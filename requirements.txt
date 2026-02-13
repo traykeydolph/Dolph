@@ -1,0 +1,8 @@
+python-dotenv
+google-generativeai
+alpaca-py
+python-telegram-bot
+aiohttp
+requests
+pytest
+pytest-asyncio
