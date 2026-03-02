@@ -6,6 +6,19 @@ from datetime import datetime, timezone
 
 
 class Database:
+    TRADE_COLUMNS = frozenset({
+        'analyst', 'message_id', 'action', 'asset_type', 'ticker', 'direction',
+        'strike', 'expiry', 'entry_price', 'executed_price', 'quantity',
+        'position_size', 'trim_fraction', 'pnl', 'confidence', 'raw_message',
+        'created_at', 'executed_at', 'status',
+    })
+    POSITION_COLUMNS = frozenset({
+        'analyst', 'ticker', 'asset_type', 'direction', 'strike', 'expiry',
+        'entry_price', 'current_quantity', 'original_quantity', 'position_size',
+        'trim_count', 'status', 'opened_at', 'closed_at', 'total_pnl',
+        'stop_price', 'target_prices',
+    })
+
     def __init__(self, db_path: str = "trading_bot.db"):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
@@ -43,6 +56,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 analyst TEXT NOT NULL,
                 ticker TEXT NOT NULL,
+                asset_type TEXT,
                 direction TEXT,
                 strike REAL,
                 expiry TEXT,
@@ -65,6 +79,14 @@ class Database:
                 processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        
+        # Safe column migrations
+        for col, col_type in [("asset_type", "TEXT"), ("stop_price", "REAL"), ("target_prices", "TEXT")]:
+            try:
+                cur.execute(f"ALTER TABLE positions ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+        
         self.conn.commit()
 
     # ── message_log CRUD ─────────────────────────────────────────
@@ -115,6 +137,9 @@ class Database:
     def update_trade(self, trade_id: int, **kwargs):
         if not kwargs:
             return
+        bad = set(kwargs) - self.TRADE_COLUMNS
+        if bad:
+            raise ValueError(f"Invalid trade column(s): {bad}")
         cols = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [trade_id]
         self.conn.execute(f"UPDATE trades SET {cols} WHERE id = ?", vals)
@@ -124,19 +149,22 @@ class Database:
 
     def open_position(self, *, analyst: str, ticker: str,
                       direction: str | None = None,
+                      asset_type: str | None = None,
                       strike: float | None = None,
                       expiry: str | None = None,
                       entry_price: float | None = None,
                       current_quantity: int | None = None,
                       original_quantity: int | None = None,
-                      position_size: float | None = None) -> int:
+                      position_size: float | None = None,
+                      stop_price: float | None = None,
+                      target_prices: str | None = None) -> int:
         cur = self.conn.execute(
             "INSERT INTO positions "
-            "(analyst, ticker, direction, strike, expiry, entry_price, "
-            "current_quantity, original_quantity, position_size) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (analyst, ticker, direction, strike, expiry, entry_price,
-             current_quantity, original_quantity, position_size),
+            "(analyst, ticker, direction, asset_type, strike, expiry, entry_price, "
+            "current_quantity, original_quantity, position_size, stop_price, target_prices) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (analyst, ticker, direction, asset_type or 'option', strike, expiry, entry_price,
+             current_quantity, original_quantity, position_size, stop_price, target_prices),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -144,6 +172,9 @@ class Database:
     def update_position(self, position_id: int, **kwargs):
         if not kwargs:
             return
+        bad = set(kwargs) - self.POSITION_COLUMNS
+        if bad:
+            raise ValueError(f"Invalid position column(s): {bad}")
         cols = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [position_id]
         self.conn.execute(f"UPDATE positions SET {cols} WHERE id = ?", vals)

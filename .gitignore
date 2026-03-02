@@ -5,4 +5,13 @@ __pycache__/
 logs/
 data/*.json
 *.db
+*.db-journal
+*.session
+config/coinbase_credentials.json
+config/google_sheets_credentials.json
+config/*.json
+bot_stdout.log
+trading_bot.out
+bot.log
+*.pid
 

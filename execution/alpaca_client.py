@@ -1,0 +1,711 @@
+"""Alpaca API client — handles options and stock order execution."""
+
+import logging
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List
+import time
+import requests as _requests
+
+import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import APIError
+
+from config import Config
+from parsers.base import ParsedSignal, SignalAction, AssetType
+
+logger = logging.getLogger(__name__)
+
+
+class AlpacaClient:
+    """Alpaca API wrapper for order execution and account management."""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.api = tradeapi.REST(
+            key_id=config.alpaca_api_key,
+            secret_key=config.alpaca_secret_key,
+            base_url=config.alpaca_base_url,
+            api_version='v2'
+        )
+        
+        # Verify connection
+        try:
+            account = self.api.get_account()
+            logger.info("Connected to Alpaca: %s account, $%s buying power", 
+                       account.status, account.buying_power)
+        except Exception:
+            logger.exception("Failed to connect to Alpaca API")
+            raise
+    
+    def force_close_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Force close a position using Alpaca's native close-position API. Works with any symbol including options."""
+        try:
+            response = self.api.close_position(symbol)
+            logger.info("Force-closed position %s via Alpaca API", symbol)
+            return {
+                'order_id': getattr(response, 'id', None),
+                'symbol': symbol,
+                'status': getattr(response, 'status', 'submitted'),
+                'filled_price': float(response.filled_avg_price) if getattr(response, 'filled_avg_price', None) else 0,
+                'filled_qty': int(response.filled_qty) if getattr(response, 'filled_qty', None) else 0
+            }
+        except APIError as e:
+            logger.error("Alpaca force-close failed for %s: %s", symbol, str(e))
+            return None
+        except Exception:
+            logger.exception("Unexpected error force-closing %s", symbol)
+            return None
+
+    def close_all_positions(self) -> list:
+        """Close all open positions on Alpaca. Returns list of results."""
+        results = []
+        try:
+            positions = self.api.list_positions()
+            for pos in positions:
+                result = self.force_close_by_symbol(pos.symbol)
+                results.append({
+                    'symbol': pos.symbol,
+                    'qty': pos.qty,
+                    'pnl': float(pos.unrealized_pl),
+                    'success': result is not None
+                })
+            return results
+        except Exception:
+            logger.exception("Error closing all Alpaca positions")
+            return results
+
+    def list_open_positions(self) -> list:
+        """List all open Alpaca positions."""
+        try:
+            return self.api.list_positions()
+        except Exception:
+            logger.exception("Error listing Alpaca positions")
+            return []
+
+    def execute_entry_order(self, signal: ParsedSignal, position_size: float) -> Optional[Dict[str, Any]]:
+        """Execute entry order based on parsed signal."""
+        
+        try:
+            if signal.asset_type == AssetType.OPTION:
+                return self._execute_option_entry(signal, position_size)
+            elif signal.asset_type == AssetType.STOCK:
+                return self._execute_stock_entry(signal, position_size)
+            else:
+                logger.error("Unsupported asset type for Alpaca: %s", signal.asset_type)
+                return None
+                
+        except APIError as e:
+            logger.error("Alpaca API error executing entry: %s", str(e))
+            return None
+        except Exception:
+            logger.exception("Unexpected error executing entry order")
+            return None
+    
+    def execute_exit_order(self, signal: ParsedSignal, quantity: int) -> Optional[Dict[str, Any]]:
+        """Execute exit order to close position."""
+        
+        try:
+            if signal.asset_type == AssetType.OPTION:
+                return self._execute_option_exit(signal, quantity)
+            elif signal.asset_type == AssetType.STOCK:
+                return self._execute_stock_exit(signal, quantity)
+            else:
+                logger.error("Unsupported asset type for Alpaca: %s", signal.asset_type)
+                return None
+                
+        except APIError as e:
+            logger.error("Alpaca API error executing exit: %s", str(e))
+            return None
+        except Exception:
+            logger.exception("Unexpected error executing exit order")
+            return None
+    
+    def _execute_option_entry(self, signal: ParsedSignal, position_size: float) -> Optional[Dict[str, Any]]:
+        """Execute options entry order."""
+        
+        # Build option symbol (with fallback resolution)
+        option_symbol = self._build_option_symbol(signal)
+        if not option_symbol:
+            logger.warning("Primary symbol build failed for %s — trying options chain resolve", signal.ticker)
+            option_symbol = self._resolve_option_symbol(signal)
+        if not option_symbol:
+            logger.error("Failed to build/resolve option symbol for %s", signal.ticker)
+            return None
+        
+        # Get current option price for quantity calculation
+        quote = self._get_option_quote(option_symbol)
+        if not quote:
+            logger.error("Failed to get quote for %s", option_symbol)
+            return None
+        
+        # Calculate quantity based on position size
+        mid_price = (quote['bid'] + quote['ask']) / 2 if quote['bid'] and quote['ask'] else quote.get('last', 0)
+        if mid_price <= 0:
+            logger.error("Invalid option price for %s: %s", option_symbol, mid_price)
+            return None
+            
+        # Options are quoted per share but represent 100 shares
+        quantity = max(1, int(position_size / (mid_price * 100)))
+        
+        # Place order — use limit at ask to avoid wide spread slippage
+        side = 'buy' if signal.direction in ['call', 'put', 'long'] else 'sell'
+        limit_price = round(quote['ask'], 2) if quote['ask'] else round(mid_price * 1.02, 2)
+
+        order = self.api.submit_order(
+            symbol=option_symbol,
+            qty=quantity,
+            side=side,
+            type='limit',
+            limit_price=limit_price,
+            time_in_force='day',
+            client_order_id=f"{signal.analyst}_{signal.message_id}"
+        )
+
+        logger.info("Submitted option limit order: %s %d %s @ $%.2f",
+                   side, quantity, option_symbol, limit_price)
+
+        # Wait for fill — fall back to market if limit doesn't fill
+        filled_order = self._wait_for_fill(order.id, timeout=15)
+        if filled_order is None or filled_order.status not in ('filled', 'partially_filled'):
+            logger.warning("Limit order %s not filled in 15s — replacing with market order", order.id)
+            try:
+                self.api.cancel_order(order.id)
+            except Exception:
+                pass
+            order = self.api.submit_order(
+                symbol=option_symbol,
+                qty=quantity,
+                side=side,
+                type='market',
+                time_in_force='day',
+                client_order_id=f"{signal.analyst}_{signal.message_id}_mkt"
+            )
+            filled_order = self._wait_for_fill(order.id, timeout=30)
+        
+        return {
+            'order_id': order.id,
+            'symbol': option_symbol,
+            'quantity': quantity,
+            'side': side,
+            'status': filled_order.status if filled_order else 'pending',
+            'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else mid_price,
+            'filled_qty': int(filled_order.filled_qty) if filled_order else 0
+        }
+    
+    def _execute_stock_entry(self, signal: ParsedSignal, position_size: float) -> Optional[Dict[str, Any]]:
+        """Execute stock entry order."""
+        
+        # Get current stock price
+        quote = self._get_stock_quote(signal.ticker)
+        if not quote:
+            logger.error("Failed to get quote for %s", signal.ticker)
+            return None
+        
+        current_price = quote.get('last', quote.get('close', 0))
+        if current_price <= 0:
+            logger.error("Invalid stock price for %s: %s", signal.ticker, current_price)
+            return None
+        
+        # Calculate quantity
+        quantity = max(1, int(position_size / current_price))
+        
+        # Place order
+        side = 'buy' if signal.direction == 'long' else 'sell'
+        
+        order = self.api.submit_order(
+            symbol=signal.ticker,
+            qty=quantity,
+            side=side,
+            type='market',
+            time_in_force='day',
+            client_order_id=f"{signal.analyst}_{signal.message_id}"
+        )
+        
+        logger.info("Submitted stock order: %s %d %s @ market", 
+                   side, quantity, signal.ticker)
+        
+        # Wait for fill
+        filled_order = self._wait_for_fill(order.id, timeout=30)
+        
+        return {
+            'order_id': order.id,
+            'symbol': signal.ticker,
+            'quantity': quantity,
+            'side': side,
+            'status': filled_order.status if filled_order else 'pending',
+            'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else current_price,
+            'filled_qty': int(filled_order.filled_qty) if filled_order else 0
+        }
+    
+    def _execute_option_exit(self, signal: ParsedSignal, quantity: int) -> Optional[Dict[str, Any]]:
+        """Execute options exit order."""
+        
+        option_symbol = self._build_option_symbol(signal)
+        if not option_symbol:
+            # Try position lookup first (most reliable for exits)
+            logger.warning("Primary symbol build failed for exit %s — checking open positions", signal.ticker)
+            option_symbol = self._find_option_symbol_from_positions(signal)
+        if not option_symbol:
+            # Final fallback: options chain resolve
+            logger.warning("Position lookup failed for exit %s — trying options chain resolve", signal.ticker)
+            option_symbol = self._resolve_option_symbol(signal)
+        if not option_symbol:
+            logger.error("Failed to build/resolve option symbol for exit: %s", signal.ticker)
+            return None
+        
+        # Exit is opposite of entry — use limit at bid to avoid spread slippage
+        side = 'sell'  # Assuming we're closing long positions
+
+        # Get quote for limit pricing
+        quote = self._get_option_quote(option_symbol)
+        if quote and quote.get('bid') and quote['bid'] > 0:
+            limit_price = round(quote['bid'], 2)
+        else:
+            limit_price = None  # will fall through to market
+
+        if limit_price:
+            order = self.api.submit_order(
+                symbol=option_symbol,
+                qty=quantity,
+                side=side,
+                type='limit',
+                limit_price=limit_price,
+                time_in_force='day',
+                client_order_id=f"{signal.analyst}_{signal.message_id}_exit"
+            )
+            logger.info("Submitted option exit limit: %s %d %s @ $%.2f",
+                       side, quantity, option_symbol, limit_price)
+
+            filled_order = self._wait_for_fill(order.id, timeout=15)
+            if filled_order is None or filled_order.status not in ('filled', 'partially_filled'):
+                logger.warning("Exit limit order %s not filled in 15s — replacing with market", order.id)
+                try:
+                    self.api.cancel_order(order.id)
+                except Exception:
+                    pass
+                order = self.api.submit_order(
+                    symbol=option_symbol,
+                    qty=quantity,
+                    side=side,
+                    type='market',
+                    time_in_force='day',
+                    client_order_id=f"{signal.analyst}_{signal.message_id}_exit_mkt"
+                )
+                filled_order = self._wait_for_fill(order.id, timeout=30)
+        else:
+            order = self.api.submit_order(
+                symbol=option_symbol,
+                qty=quantity,
+                side=side,
+                type='market',
+                time_in_force='day',
+                client_order_id=f"{signal.analyst}_{signal.message_id}_exit"
+            )
+            logger.info("Submitted option exit market (no bid available): %s %d %s",
+                       side, quantity, option_symbol)
+            filled_order = self._wait_for_fill(order.id, timeout=30)
+        
+        return {
+            'order_id': order.id,
+            'symbol': option_symbol,
+            'quantity': quantity,
+            'side': side,
+            'status': filled_order.status if filled_order else 'pending',
+            'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else 0,
+            'filled_qty': int(filled_order.filled_qty) if filled_order else 0
+        }
+    
+    def _execute_stock_exit(self, signal: ParsedSignal, quantity: int) -> Optional[Dict[str, Any]]:
+        """Execute stock exit order."""
+        
+        # Exit is opposite of entry
+        side = 'sell' if signal.direction == 'long' else 'buy'
+        
+        order = self.api.submit_order(
+            symbol=signal.ticker,
+            qty=quantity,
+            side=side,
+            type='market',
+            time_in_force='day',
+            client_order_id=f"{signal.analyst}_{signal.message_id}_exit"
+        )
+        
+        logger.info("Submitted stock exit: %s %d %s @ market", 
+                   side, quantity, signal.ticker)
+        
+        filled_order = self._wait_for_fill(order.id, timeout=30)
+        
+        return {
+            'order_id': order.id,
+            'symbol': signal.ticker,
+            'quantity': quantity,
+            'side': side,
+            'status': filled_order.status if filled_order else 'pending',
+            'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else 0,
+            'filled_qty': int(filled_order.filled_qty) if filled_order else 0
+        }
+    
+    def _build_option_symbol(self, signal: ParsedSignal) -> Optional[str]:
+        """Build Alpaca option symbol from signal data."""
+        
+        if not all([signal.ticker, signal.expiry, signal.strike, signal.direction]):
+            logger.error("Missing required option data: %s", signal)
+            return None
+        
+        try:
+            # Parse expiry date
+            if 'T' in signal.expiry:
+                expiry_date = datetime.fromisoformat(signal.expiry.replace('Z', '+00:00')).date()
+            else:
+                expiry_date = datetime.fromisoformat(signal.expiry).date()
+            
+            # Safety: if expiry is in the past, fix year to current year
+            today = datetime.now(timezone.utc).date()
+            if expiry_date < today:
+                expiry_date = expiry_date.replace(year=today.year)
+                logger.warning("Fixed stale expiry year → %s", expiry_date)
+            
+            # Format: TICKER + YYMMDD + C/P + strike*1000 (padded to 8 digits)
+            # Example: SPY260221C00450000 (SPY, Feb 21 2026, Call, $450)
+            
+            date_str = expiry_date.strftime('%y%m%d')
+            option_type = 'C' if signal.direction == 'call' else 'P'
+            strike_str = f"{int(signal.strike * 1000):08d}"
+            
+            option_symbol = f"{signal.ticker}{date_str}{option_type}{strike_str}"
+            
+            return option_symbol
+            
+        except Exception:
+            logger.exception("Failed to build option symbol from %s", signal)
+            return None
+    
+    # ------------------------------------------------------------------
+    # Options-chain fallback: resolve missing strike / expiry / direction
+    # ------------------------------------------------------------------
+
+    def _resolve_option_symbol(self, signal: ParsedSignal) -> Optional[str]:
+        """Fallback: query Alpaca options chain to fill in missing fields and return an OCC symbol."""
+        ticker = signal.ticker
+        if not ticker:
+            return None
+
+        direction = signal.direction
+        # Default direction when missing
+        if direction in (None, 'long'):
+            direction = 'call'
+        elif direction == 'short':
+            direction = 'put'
+        option_type = 'call' if direction == 'call' else 'put'
+
+        strike = signal.strike
+        expiry_str = signal.expiry  # may be None
+
+        headers = {
+            'APCA-API-KEY-ID': self.config.alpaca_api_key,
+            'APCA-API-SECRET-KEY': self.config.alpaca_secret_key,
+        }
+        today = datetime.now(timezone.utc).date()
+
+        try:
+            # --- Build query params ---
+            params: Dict[str, Any] = {
+                'underlying_symbols': ticker.upper(),
+                'status': 'active',
+                'type': option_type,
+                'limit': 500,
+            }
+
+            if expiry_str:
+                # We have an expiry – use exact date filter
+                if 'T' in expiry_str:
+                    exp_date = datetime.fromisoformat(expiry_str.replace('Z', '+00:00')).date()
+                else:
+                    exp_date = datetime.fromisoformat(expiry_str).date()
+                if exp_date < today:
+                    exp_date = exp_date.replace(year=today.year)
+                params['expiration_date'] = exp_date.isoformat()
+            else:
+                # No expiry – get nearest available
+                params['expiration_date_gte'] = today.isoformat()
+
+            if strike is not None:
+                params['strike_price_gte'] = str(strike)
+                params['strike_price_lte'] = str(strike)
+
+            resp = _requests.get(
+                f'{self.config.alpaca_base_url}/v2/options/contracts',
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            contracts = resp.json().get('option_contracts', [])
+
+            if not contracts:
+                logger.warning("No contracts found for resolve query: %s", params)
+                return None
+
+            # --- Pick best contract ---
+            if strike is None:
+                # Need ATM – get current stock price
+                stock_quote = self._get_stock_quote(ticker)
+                current_price = stock_quote.get('last', 0) if stock_quote else 0
+                if current_price <= 0:
+                    logger.error("Cannot determine ATM – no stock price for %s", ticker)
+                    return None
+                # Pick contract with strike closest to current price
+                contracts.sort(key=lambda c: abs(float(c.get('strike_price', 0)) - current_price))
+
+            if not expiry_str:
+                # Pick nearest expiry among candidates
+                contracts.sort(key=lambda c: c.get('expiration_date', '9999-99-99'))
+
+            chosen = contracts[0]
+            symbol = chosen.get('symbol')
+            logger.info(
+                "Resolved option symbol via chain lookup: %s (strike=%s, expiry=%s, type=%s) for signal %s",
+                symbol,
+                chosen.get('strike_price'),
+                chosen.get('expiration_date'),
+                option_type,
+                signal.ticker,
+            )
+            return symbol
+
+        except Exception:
+            logger.exception("_resolve_option_symbol failed for %s", ticker)
+            return None
+
+    def _find_option_symbol_from_positions(self, signal: ParsedSignal) -> Optional[str]:
+        """For exits: look up the option symbol from open Alpaca positions matching this signal's ticker."""
+        try:
+            positions = self.api.list_positions()
+            ticker_upper = signal.ticker.upper() if signal.ticker else ''
+            matches = []
+            for pos in positions:
+                sym = pos.symbol
+                # OCC symbols start with underlying ticker
+                if sym.startswith(ticker_upper) and len(sym) > len(ticker_upper):
+                    # Optionally filter by direction (C/P)
+                    if signal.direction in ('call', None, 'long') and 'C' in sym[len(ticker_upper):len(ticker_upper)+7]:
+                        matches.append(pos)
+                    elif signal.direction in ('put', 'short') and 'P' in sym[len(ticker_upper):len(ticker_upper)+7]:
+                        matches.append(pos)
+                    elif signal.direction is None:
+                        matches.append(pos)
+            if len(matches) == 1:
+                logger.info("Found option position for exit: %s", matches[0].symbol)
+                return matches[0].symbol
+            elif len(matches) > 1:
+                # If strike is known, narrow down
+                if signal.strike:
+                    for m in matches:
+                        strike_part = m.symbol[-8:]
+                        try:
+                            pos_strike = int(strike_part) / 1000
+                            if abs(pos_strike - signal.strike) < 0.01:
+                                logger.info("Matched exit position by strike: %s", m.symbol)
+                                return m.symbol
+                        except ValueError:
+                            pass
+                # Return first match as fallback
+                logger.info("Multiple position matches for %s exit, using first: %s", ticker_upper, matches[0].symbol)
+                return matches[0].symbol
+            return None
+        except Exception:
+            logger.exception("Error looking up positions for exit symbol")
+            return None
+
+    def _get_option_quote(self, option_symbol: str) -> Optional[Dict[str, Any]]:
+        """Get current option quote via Alpaca options data API with contract fallback."""
+        try:
+            import requests
+            
+            # Options use a separate data API endpoint (not the stock endpoint)
+            headers = {
+                'APCA-API-KEY-ID': self.config.alpaca_api_key,
+                'APCA-API-SECRET-KEY': self.config.alpaca_secret_key,
+            }
+            
+            # TRY METHOD 1: Direct quote API (known to fail with "invalid symbol")
+            try:
+                resp = requests.get(
+                    'https://data.alpaca.markets/v1beta1/options/quotes/latest',
+                    headers=headers,
+                    params={'symbols': option_symbol},
+                    timeout=10
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                
+                quote_data = data.get('quotes', {}).get(option_symbol)
+                if quote_data:
+                    bid = float(quote_data.get('bp', 0))
+                    ask = float(quote_data.get('ap', 0))
+                    
+                    # Try to get last trade price
+                    last_price = 0
+                    try:
+                        trade_resp = requests.get(
+                            'https://data.alpaca.markets/v1beta1/options/trades/latest',
+                            headers=headers,
+                            params={'symbols': option_symbol},
+                            timeout=10
+                        )
+                        if trade_resp.status_code == 200:
+                            trade_data = trade_resp.json()
+                            trade_info = trade_data.get('trades', {}).get(option_symbol)
+                            if trade_info:
+                                last_price = float(trade_info.get('p', 0))
+                    except Exception:
+                        pass
+                    
+                    if not last_price and bid and ask:
+                        last_price = (bid + ask) / 2
+                    
+                    logger.debug("Quote API success for %s: bid=%.2f ask=%.2f last=%.2f", 
+                               option_symbol, bid, ask, last_price)
+                    return {
+                        'bid': bid,
+                        'ask': ask,
+                        'last': last_price
+                    }
+            except Exception as quote_error:
+                logger.warning("Quote API failed for %s: %s - trying contract fallback", 
+                             option_symbol, str(quote_error))
+            
+            # METHOD 2: Contract endpoint fallback (bypass quotes entirely)
+            logger.info("Using contract endpoint fallback for %s", option_symbol)
+            
+            # Parse the underlying symbol from option_symbol (e.g., QQQ260218P00593000 -> QQQ)
+            # Find where the date portion starts (first digit after letters)
+            underlying = ''
+            for i, ch in enumerate(option_symbol):
+                if ch.isdigit():
+                    underlying = option_symbol[:i]
+                    break
+            if not underlying:
+                underlying = option_symbol[:3]
+            
+            today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            
+            contract_resp = requests.get(
+                f'{self.config.alpaca_base_url}/v2/options/contracts',
+                headers=headers,
+                params={
+                    'underlying_symbols': underlying,
+                    'expiration_date_gte': today_str,
+                    'limit': 1000
+                },
+                timeout=10
+            )
+            contract_resp.raise_for_status()
+            contract_data = contract_resp.json()
+            
+            # Find our specific contract
+            contracts = contract_data.get('option_contracts', [])
+            target_contract = None
+            for contract in contracts:
+                if contract.get('symbol') == option_symbol:
+                    target_contract = contract
+                    break
+            
+            if not target_contract:
+                logger.error("Contract not found in API response for %s", option_symbol)
+                return None
+            
+            # Extract pricing from contract data (contracts include mark prices)
+            mark_price = target_contract.get('close_price', 0) or target_contract.get('mark_price', 0)
+            
+            if not mark_price:
+                logger.error("No pricing data in contract for %s", option_symbol)
+                return None
+            
+            # Estimate bid/ask from mark (typical 5% spread for options)
+            spread_pct = 0.05
+            spread = max(0.01, mark_price * spread_pct)  # Min $0.01 spread
+            bid = max(0.01, mark_price - spread/2)
+            ask = mark_price + spread/2
+            
+            logger.info("Contract fallback success for %s: mark=%.2f (bid=%.2f ask=%.2f)", 
+                       option_symbol, mark_price, bid, ask)
+            
+            return {
+                'bid': bid,
+                'ask': ask,
+                'last': mark_price
+            }
+            
+        except Exception as e:
+            logger.error("All quote methods failed for %s: %s", option_symbol, str(e))
+            return None
+    
+    def _get_stock_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get current stock quote."""
+        try:
+            quote = self.api.get_latest_quote(symbol)
+            
+            # Get last trade price separately
+            last_price = 0
+            try:
+                trade = self.api.get_latest_trade(symbol)
+                last_price = float(trade.price) if trade.price else 0
+            except Exception:
+                # Fallback to latest bar close price
+                try:
+                    bars = self.api.get_bars(symbol, tradeapi.rest.TimeFrame.Minute, limit=1)
+                    if bars and len(bars) > 0:
+                        last_price = float(bars[0].c)  # close price
+                except Exception:
+                    # Final fallback to midpoint
+                    if quote.bid_price and quote.ask_price:
+                        last_price = (float(quote.bid_price) + float(quote.ask_price)) / 2
+            
+            return {
+                'bid': float(quote.bid_price) if quote.bid_price else 0,
+                'ask': float(quote.ask_price) if quote.ask_price else 0,
+                'last': last_price
+            }
+        except Exception:
+            logger.exception("Failed to get stock quote for %s", symbol)
+            return None
+    
+    def _wait_for_fill(self, order_id: str, timeout: int = 30) -> Optional[Any]:
+        """Wait for order to fill with timeout."""
+        
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                order = self.api.get_order(order_id)
+                
+                if order.status in ['filled', 'partially_filled']:
+                    logger.info("Order %s filled: %s shares @ $%s", 
+                               order_id, order.filled_qty, order.filled_avg_price)
+                    return order
+                elif order.status in ['cancelled', 'rejected']:
+                    logger.error("Order %s failed: %s", order_id, order.status)
+                    return order
+                
+                time.sleep(1)  # Wait 1 second before checking again
+                
+            except Exception:
+                logger.exception("Error checking order status for %s", order_id)
+                break
+        
+        logger.warning("Order %s timeout after %d seconds", order_id, timeout)
+        return None
+    
+    def get_account_info(self) -> Optional[Dict[str, Any]]:
+        """Get account information and buying power."""
+        try:
+            account = self.api.get_account()
+            return {
+                'buying_power': float(account.buying_power),
+                'cash': float(account.cash),
+                'portfolio_value': float(account.portfolio_value),
+                'status': account.status
+            }
+        except Exception:
+            logger.exception("Failed to get account info")
+            return None
