@@ -6,3 +6,5 @@ aiohttp
 requests
 pytest
 pytest-asyncio
+gspread
+google-auth

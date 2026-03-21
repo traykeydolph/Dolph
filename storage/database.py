@@ -189,6 +189,42 @@ class Database:
         )
         self.conn.commit()
 
+    def trim_and_log(self, position_id: int, position_updates: dict,
+                     trade_kwargs: dict) -> int:
+        """Atomic trim: update position + log trade in one transaction.
+        Returns trade ID. Rolls back both on failure."""
+        try:
+            # Update position
+            bad = set(position_updates) - self.POSITION_COLUMNS
+            if bad:
+                raise ValueError(f"Invalid position column(s): {bad}")
+            cols = ", ".join(f"{k} = ?" for k in position_updates)
+            vals = list(position_updates.values()) + [position_id]
+            self.conn.execute(f"UPDATE positions SET {cols} WHERE id = ?", vals)
+
+            # Log trade
+            cur = self.conn.execute(
+                "INSERT INTO trades "
+                "(analyst, message_id, action, asset_type, ticker, direction, "
+                "strike, expiry, entry_price, executed_price, quantity, position_size, "
+                "trim_fraction, pnl, confidence, raw_message, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (trade_kwargs.get('analyst'), trade_kwargs.get('message_id'),
+                 trade_kwargs.get('action'), trade_kwargs.get('asset_type'),
+                 trade_kwargs.get('ticker'), trade_kwargs.get('direction'),
+                 trade_kwargs.get('strike'), trade_kwargs.get('expiry'),
+                 trade_kwargs.get('entry_price'), trade_kwargs.get('executed_price'),
+                 trade_kwargs.get('quantity'), trade_kwargs.get('position_size'),
+                 trade_kwargs.get('trim_fraction'), trade_kwargs.get('pnl'),
+                 trade_kwargs.get('confidence'), trade_kwargs.get('raw_message'),
+                 trade_kwargs.get('status', 'executed')),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def get_open_positions(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM positions WHERE status = 'open'"

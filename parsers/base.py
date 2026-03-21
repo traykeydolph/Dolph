@@ -20,7 +20,7 @@ class AssetType(str, Enum):
 
 @dataclass
 class ParsedSignal:
-    analyst: str              # "grizzlies" | "waxui" | "enhanced_market"
+    analyst: str              # "grizzlies" | "waxui" | "enhanced_market" | "ecs"
     action: str               # SignalAction value
     asset_type: str           # AssetType value
     ticker: str               # "SPY", "BTC", "AAPL" etc.
@@ -33,3 +33,5 @@ class ParsedSignal:
     raw_message: str          # Original Discord message
     message_id: str           # Discord message ID (dedup)
     timestamp: str            # ISO timestamp
+    stop_price: float | None = None      # Stop loss price level
+    target_prices: list | None = None    # Take profit price levels [T1, T2, T3]

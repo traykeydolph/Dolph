@@ -110,7 +110,14 @@ class WaxuiParser:
             year = datetime.now().year
             month, day = expiry_raw.split('/')
             expiry = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-            
+
+            # Validate the date is real
+            try:
+                datetime.strptime(expiry, "%Y-%m-%d")
+            except ValueError:
+                logger.warning("Invalid expiry date '%s' from Waxui message: %s", expiry, message[:80])
+                return None
+
             return ParsedSignal(
                 analyst="waxui",
                 action=SignalAction.ENTRY.value,
@@ -330,6 +337,12 @@ NOISE (action:"info"):
                 current_year = datetime.now().year
                 month, day = expiry_str.split('/')
                 expiry = f"{current_year}-{month.zfill(2)}-{day.zfill(2)}"
+                # Validate the date is real
+                try:
+                    datetime.strptime(expiry, "%Y-%m-%d")
+                except ValueError:
+                    logger.warning("Invalid expiry date '%s' from Waxui extraction", expiry)
+                    return None
                 return {'expiry': expiry, 'strike': strike, 'direction': direction}
             except Exception:
                 logger.warning("Failed to parse expiry: %s", expiry_str)
