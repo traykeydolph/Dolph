@@ -6,12 +6,18 @@ logs/
 data/*.json
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.session
+*.pem
+config/*.pem
 config/coinbase_credentials.json
 config/google_sheets_credentials.json
 config/*.json
 bot_stdout.log
 trading_bot.out
 bot.log
+*.log
 *.pid
+.DS_Store
 

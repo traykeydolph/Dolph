@@ -13,6 +13,7 @@ from parsers.ecs import ECSParser
 from parsers.waxui import WaxuiParser
 from parsers.grizzlies import GrizzliesParser
 from parsers.zabes import ZabesParser
+from parsers.eva import EvaParser
 from parsers.obsidian_matcher import match as obsidian_match, append_to_library
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,9 @@ class SignalRouter:
         if analyst == "zabes" and ZabesParser.is_noise(parse_content):
             logger.info("Zabes noise short-circuit: %s", message_id)
             return None
+        if analyst == "eva" and EvaParser.is_noise(parse_content):
+            logger.info("Eva noise short-circuit: %s", message_id)
+            return None
         # Image-only messages (Discord CDN with no signal)
         if parse_content.strip().startswith('https://cdn.discordapp.com/') and '\n' not in parse_content.strip():
             logger.debug("Image-only message, skipping: %s", message_id)
@@ -122,6 +126,7 @@ class SignalRouter:
                 "waxui": WaxuiParser.extract_details,
                 "zabes": ZabesParser.extract_details,
                 "grizzlies": GrizzliesParser.extract_details,
+                "eva": EvaParser.extract_details,
             }
             
             extractor = regex_extractors.get(analyst)
@@ -147,10 +152,12 @@ class SignalRouter:
                     signal.confidence = max(signal.confidence, 0.9)
         else:
             # === TIER 2.5: Try regex extraction BEFORE Gemini (free, instant) ===
+            signal = None
             regex_extractors_t25 = {
                 "waxui": WaxuiParser.extract_details,
                 "zabes": ZabesParser.extract_details,
                 "grizzlies": GrizzliesParser.extract_details,
+                "eva": EvaParser.extract_details,
             }
             extractor = regex_extractors_t25.get(analyst)
             if extractor:

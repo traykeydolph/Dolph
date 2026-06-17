@@ -111,7 +111,8 @@ class Config:
         }
         # Merge Telegram channel→analyst mappings
         mapping.update(self.telegram_channel_to_analyst)
-        return mapping
+        # Filter out empty channel IDs
+        return {k: v for k, v in mapping.items() if k}
 
     @property
     def watched_channels(self) -> list[str]:
@@ -126,12 +127,12 @@ class Config:
         ]
         # Include Telegram channels (prefixed with tg_) so signal_router accepts them
         telegram = [f"tg_{ch}" for ch in self.telegram_signal_channels]
-        return discord + telegram
+        return [ch for ch in discord + telegram if ch and ch != "tg_"]
 
     @property
     def discord_only_channels(self) -> list[str]:
         """Only Discord channels — used by discord_poller (excludes Telegram)."""
-        return [
+        return [ch for ch in [
             self.discord_channel_grizzlies,
             self.discord_channel_waxui,
             self.discord_channel_em,
@@ -139,7 +140,7 @@ class Config:
             self.discord_channel_eva,
             self.discord_channel_nando,
             self.discord_channel_zabes,
-        ]
+        ] if ch]
 
     # Waxui trim schedule
     WAXUI_TRIM_FRACTIONS: tuple = (0.2, 0.2, 0.2, 0.2, 0.2)

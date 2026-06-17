@@ -19,7 +19,7 @@ class GrizzliesParser:
     OPTION_PATTERN = r'(?i)\b([A-Z]{1,5})\s+(?:(\d+(?:\.\d+)?)\s*[cCpP]\s+(\d{1,2}/\d{1,2})|(\d{1,2}/\d{1,2})\s+(\d+(?:\.\d+)?)\s*[cCpP])'
     ENTRY_PATTERN = r'(?i)(?:entry|entries?)[:=\s]*([0-9.,\s\-and]+)'
     TARGET_PATTERN = r'(?i)(?:targets?|TPs?)[:=\s]*([0-9.,\s\-and]+)'
-    STOP_PATTERN = r'(?i)(?:stop\s*loss|SL)[:=\s]*([0-9.]+)'
+    STOP_PATTERN = r'(?i)(?:stop\s*loss|stoploss|SL)(?:[:=\s]+(?:is|at|around))?[:=\s]*(?:day\s+(?:high|low)\s+)?\$?([0-9.]+)'
     
     @staticmethod
     def is_noise(message: str) -> bool:
@@ -111,29 +111,56 @@ QUOTED/REPLY CONTEXT:
         re.IGNORECASE
     )
 
-    # "Sold rest" / "going to cut" — EXIT not entry
+    # "Sold rest" / "going to cut" / "closing X" / "cutting X" — EXIT not entry
     EXIT_LANGUAGE_RE = re.compile(
-        r'all\s+TPs?\s+hit|'
-        r'closed?\s+(?:my\s+)?(?:long|short|runner|position)|'
-        r'stopped?\s+out|'
-        r'going\s+to\s+cut|'
-        r'sold\s+(?:the\s+)?rest',
+        r'\ball\s+TPs?\s+hit\b|'
+        # Present progressive — Grizzlies' dominant pattern: "Closing ibit puts", "Cutting calls"
+        r'\b(?:closing|cutting)\b|'
+        # Past + bare imperative: "closed the rest", "close here", "closed out", "closed on a -X% loss"
+        r'\bclosed?\s+(?:the\s+|my\s+|out\b|here\b|on\s+a\b)|'
+        # "Cut -25%", "Cut this", "Cut here", "cut ibit calls"
+        r'\bcut\s+(?:-?\d+%|this|here|\w+\s+(?:calls?|puts?))|'
+        # Stops — allow "stopped me out"
+        r'\bstopped?\s+(?:me\s+)?out\b|'
+        # Sold — allow "entire"/"all" not just "rest"
+        r'\bsold\s+(?:the\s+)?(?:rest|entire|all)\b|'
+        # Intent
+        r'\bgoing\s+to\s+(?:cut|close)\b',
         re.IGNORECASE
     )
+
+    # Splits router-prepended "[Replying to: <ref>]\n\n<current>" into (reply_block, current).
+    # Action verbs (EXIT/TRIM) and entry patterns (OPTION/CRYPTO) must match in the
+    # current message — otherwise replies-to-an-entry get misread as new entries, and
+    # replies-to-an-exit get misread as new exits.
+    _REPLY_PREFIX_RE = re.compile(r'^\[Replying to:\s*(.*?)\]\s*\n\n', re.DOTALL)
+
+    @staticmethod
+    def _split_reply_block(message: str) -> tuple[str, str]:
+        m = GrizzliesParser._REPLY_PREFIX_RE.match(message)
+        if m:
+            return m.group(1), message[m.end():]
+        return "", message
 
     @staticmethod
     def extract_details(message: str, message_id: str = "",
                        timestamp: str = "") -> Optional[ParsedSignal]:
-        """Extract signal details via regex — no Gemini needed for clear patterns."""
+        """Extract signal details via regex — no Gemini needed for clear patterns.
 
-        if GrizzliesParser.is_noise(message):
+        Action verbs and entry patterns are matched against the CURRENT message only.
+        The reply context is used only to inherit ticker when the current message omits it.
+        """
+        reply_block, current = GrizzliesParser._split_reply_block(message)
+
+        if GrizzliesParser.is_noise(current):
             return None
 
-        msg_lower = message.lower()
+        msg_lower = current.lower()
 
-        # Exit detection
-        if GrizzliesParser.EXIT_LANGUAGE_RE.search(message):
-            ticker = GrizzliesParser._extract_ticker_from_message(message)
+        # Exit detection — current message only
+        if GrizzliesParser.EXIT_LANGUAGE_RE.search(current):
+            ticker = (GrizzliesParser._extract_ticker_from_message(current)
+                      or GrizzliesParser._extract_ticker_from_message(reply_block))
             return ParsedSignal(
                 analyst="grizzlies",
                 action=SignalAction.EXIT.value,
@@ -145,9 +172,10 @@ QUOTED/REPLY CONTEXT:
                 raw_message=message, message_id=message_id, timestamp=timestamp,
             )
 
-        # Profit update / trim detection (before entry to avoid misclassification)
-        if GrizzliesParser.PROFIT_UPDATE_RE.search(message):
-            ticker = GrizzliesParser._extract_ticker_from_message(message)
+        # Profit update / trim detection — current message only
+        if GrizzliesParser.PROFIT_UPDATE_RE.search(current):
+            ticker = (GrizzliesParser._extract_ticker_from_message(current)
+                      or GrizzliesParser._extract_ticker_from_message(reply_block))
             return ParsedSignal(
                 analyst="grizzlies",
                 action=SignalAction.TRIM.value,
@@ -159,8 +187,8 @@ QUOTED/REPLY CONTEXT:
                 raw_message=message, message_id=message_id, timestamp=timestamp,
             )
 
-        # Option entry: "TICKER STRIKEc MM/DD" or "TICKER MM/DD STRIKEc"
-        opt_match = re.search(GrizzliesParser.OPTION_PATTERN, message)
+        # Option entry — must match in current message (not the prepended reply context)
+        opt_match = re.search(GrizzliesParser.OPTION_PATTERN, current)
         if opt_match:
             ticker = opt_match.group(1).upper()
             # Groups 2,3 = "STRIKEc DATE" format; Groups 4,5 = "DATE STRIKEc" format
@@ -171,8 +199,8 @@ QUOTED/REPLY CONTEXT:
                 expiry_raw = opt_match.group(4)
                 strike_str = opt_match.group(5)
 
-            # Determine C or P from the character after strike
-            cp_match = re.search(r'(\d+(?:\.\d+)?)\s*([cCpP])', message)
+            # Determine C or P from the character after strike (in current msg)
+            cp_match = re.search(r'(\d+(?:\.\d+)?)\s*([cCpP])', current)
             direction = 'call' if cp_match and cp_match.group(2).lower() == 'c' else 'put'
 
             year = datetime.now().year
@@ -183,8 +211,8 @@ QUOTED/REPLY CONTEXT:
             except ValueError:
                 return None
 
-            # Extract price if present
-            price_match = re.search(r'[@]\s*\$?(\d+(?:\.\d+)?)', message)
+            # Extract price if present (from current msg)
+            price_match = re.search(r'[@]\s*\$?(\d+(?:\.\d+)?)', current)
             price = float(price_match.group(1)) if price_match else None
 
             return ParsedSignal(
@@ -198,14 +226,14 @@ QUOTED/REPLY CONTEXT:
                 raw_message=message, message_id=message_id, timestamp=timestamp,
             )
 
-        # Crypto entry: "TICKER long" with entries/targets
-        entry_match = re.search(GrizzliesParser.ENTRY_PATTERN, message)
-        if entry_match and re.search(GrizzliesParser.CRYPTO_PATTERN, message):
-            ticker_match = re.search(GrizzliesParser.CRYPTO_PATTERN, message)
+        # Crypto entry — must match in current message
+        entry_match = re.search(GrizzliesParser.ENTRY_PATTERN, current)
+        if entry_match and re.search(GrizzliesParser.CRYPTO_PATTERN, current):
+            ticker_match = re.search(GrizzliesParser.CRYPTO_PATTERN, current)
             ticker = ticker_match.group(1).upper()
-            entries = GrizzliesParser._extract_entries(message)
-            targets = GrizzliesParser._extract_targets(message)
-            stop_match = re.search(GrizzliesParser.STOP_PATTERN, message)
+            entries = GrizzliesParser._extract_entries(current)
+            targets = GrizzliesParser._extract_targets(current)
+            stop_match = re.search(GrizzliesParser.STOP_PATTERN, current)
 
             direction = "short" if "short" in msg_lower else "long"
 
@@ -224,13 +252,24 @@ QUOTED/REPLY CONTEXT:
 
         return None  # Fall to Gemini
 
+    # Known option tickers Grizzlies trades (ETFs + stocks) — case insensitive matching
+    KNOWN_TICKERS_RE = re.compile(
+        r'\b(IBIT|BITO|MSTR|COIN|GBTC|ETHE|BITX|MARA|RIOT|CLSK|HUT|'
+        r'HOOD|SPY|QQQ|AAPL|MSFT|NVDA|AMD|TSLA|META|AMZN|NFLX|GOOGL)\b',
+        re.IGNORECASE
+    )
+
     @staticmethod
     def _extract_ticker_from_message(message: str) -> Optional[str]:
         """Extract most likely ticker from a Grizzlies message."""
-        # Check crypto tickers first
+        # Check crypto tickers first (BTC, ETH, SOL, etc.)
         crypto_match = re.search(GrizzliesParser.CRYPTO_PATTERN, message)
         if crypto_match:
             return crypto_match.group(1).upper()
+        # Check known option/ETF tickers (case insensitive — catches "Ibit", "Hood", etc.)
+        known_match = re.search(GrizzliesParser.KNOWN_TICKERS_RE, message)
+        if known_match:
+            return known_match.group(1).upper()
         # Fall back to any uppercase ticker
         skip = {'BANG', 'ALL', 'TPS', 'STILL', 'THE', 'AND', 'FOR', 'NOT'}
         tickers = re.findall(r'\b([A-Z]{2,5})\b', message)

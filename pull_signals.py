@@ -7,6 +7,9 @@ import json
 import time
 import sys
 import os
+from dotenv import load_dotenv
+
+load_dotenv(os.path.expanduser("~/Desktop/Trading/.env"))
 
 TOKEN = os.getenv("DISCORD_USER_TOKEN")
 if not TOKEN:
@@ -28,7 +31,7 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-def fetch_messages(channel_id, limit=100):
+def fetch_messages(channel_id, limit=500):
     """Fetch last N messages from a Discord channel."""
     messages = []
     url = f"https://discord.com/api/v9/channels/{channel_id}/messages?limit={min(limit, 100)}"
@@ -109,7 +112,7 @@ def main():
     
     for analyst, channel_id in CHANNELS.items():
         print(f"Fetching {analyst} (channel {channel_id})...", file=sys.stderr)
-        messages = fetch_messages(channel_id, 100)
+        messages = fetch_messages(channel_id, 500)
         print(f"  Got {len(messages)} messages", file=sys.stderr)
         
         # Build a lookup of message IDs for reply context
