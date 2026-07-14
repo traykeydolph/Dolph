@@ -14,7 +14,7 @@ short-circuit → Obsidian signal library → regex extractors) with NO LLM invo
 | 5 | Nando | no parser | low | 1,524 msgs / 35 mo | Structured entries but low activity; stays deprioritized |
 | 6 | Grizzlies | 56.5% | 26.8 | 2,000 msgs / 8.5 mo | Messiest, as feared — the old "start here" plan was the hard mode |
 | 7 | Zabes | 49.8% | 5.9 | 2,000 msgs / 26 mo | Casual prose ("24$", "boom!"), low volume, hard |
-| — | Enhanced Market | n/a | n/a | 0 msgs | **Channel read access lost** (TradeProElite role/tier issue — Tray to check) |
+| — | Enhanced Market | n/a | n/a | 0 msgs | Paid subscription intentionally paused until the bot is running — resubscribe to evaluate later |
 
 ## Why Eva
 

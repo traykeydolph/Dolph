@@ -97,50 +97,73 @@ class Config:
     timezone: str = os.getenv("TIMEZONE", "US/Pacific")
     db_path: str = os.getenv("DB_PATH", "trading_bot.db")
 
+    # Analyst gating — ENABLED_ANALYSTS env var (comma-separated, e.g. "eva").
+    # Empty/unset = all analysts enabled (backward compatible).
+    @property
+    def enabled_analysts(self) -> set[str]:
+        raw = os.getenv("ENABLED_ANALYSTS", "")
+        return {a.strip().lower() for a in raw.split(",") if a.strip()}
+
+    def _analyst_enabled(self, analyst: str) -> bool:
+        enabled = self.enabled_analysts
+        return not enabled or analyst in enabled
+
+    @property
+    def _discord_channel_analyst_pairs(self) -> list[tuple[str, str]]:
+        return [
+            (self.discord_channel_grizzlies, "grizzlies"),
+            (self.discord_channel_waxui, "waxui"),
+            (self.discord_channel_em, "enhanced_market"),
+            (self.discord_channel_ecs, "ecs"),
+            (self.discord_channel_eva, "eva"),
+            (self.discord_channel_nando, "nando"),
+            (self.discord_channel_zabes, "zabes"),
+        ]
+
     # Channel → analyst mapping
     @property
     def channel_to_analyst(self) -> dict[str, str]:
         mapping = {
-            self.discord_channel_grizzlies: "grizzlies",
-            self.discord_channel_waxui: "waxui",
-            self.discord_channel_em: "enhanced_market",
-            self.discord_channel_ecs: "ecs",
-            self.discord_channel_eva: "eva",
-            self.discord_channel_nando: "nando",
-            self.discord_channel_zabes: "zabes",
+            ch: analyst
+            for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self._analyst_enabled(analyst)
         }
-        # Merge Telegram channel→analyst mappings
-        mapping.update(self.telegram_channel_to_analyst)
-        # Filter out empty channel IDs
-        return {k: v for k, v in mapping.items() if k}
+        # Merge Telegram channel→analyst mappings (same gating)
+        mapping.update({
+            ch: analyst
+            for ch, analyst in self.telegram_channel_to_analyst.items()
+            if self._analyst_enabled(analyst)
+        })
+        return mapping
 
     @property
     def watched_channels(self) -> list[str]:
         discord = [
-            self.discord_channel_grizzlies,
-            self.discord_channel_waxui,
-            self.discord_channel_em,
-            self.discord_channel_ecs,
-            self.discord_channel_eva,
-            self.discord_channel_nando,
-            self.discord_channel_zabes,
+            ch for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self._analyst_enabled(analyst)
         ]
-        # Include Telegram channels (prefixed with tg_) so signal_router accepts them
-        telegram = [f"tg_{ch}" for ch in self.telegram_signal_channels]
-        return [ch for ch in discord + telegram if ch and ch != "tg_"]
+        # Telegram channels (prefixed tg_): when analyst gating is active, only
+        # watch channels whose mapped analyst is enabled — unmapped channels
+        # can't be attributed to an analyst, so they're excluded under gating.
+        tg_map = self.telegram_channel_to_analyst
+        telegram = []
+        for ch in self.telegram_signal_channels:
+            key = f"tg_{ch}"
+            analyst = tg_map.get(key)
+            if analyst is None:
+                if not self.enabled_analysts:
+                    telegram.append(key)
+            elif self._analyst_enabled(analyst):
+                telegram.append(key)
+        return discord + telegram
 
     @property
     def discord_only_channels(self) -> list[str]:
         """Only Discord channels — used by discord_poller (excludes Telegram)."""
-        return [ch for ch in [
-            self.discord_channel_grizzlies,
-            self.discord_channel_waxui,
-            self.discord_channel_em,
-            self.discord_channel_ecs,
-            self.discord_channel_eva,
-            self.discord_channel_nando,
-            self.discord_channel_zabes,
-        ] if ch]
+        return [
+            ch for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self._analyst_enabled(analyst)
+        ]
 
     # Waxui trim schedule
     WAXUI_TRIM_FRACTIONS: tuple = (0.2, 0.2, 0.2, 0.2, 0.2)

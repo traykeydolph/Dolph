@@ -45,9 +45,9 @@
 - **Deliverable:** Ranked report with a recommendation
 
 ### Evening 4 — Commit & Simplify
-- [ ] Pick the starting analyst
-- [ ] Put bot in single-analyst mode (all others disabled in config)
-- [ ] Strip surface area down to just that pipeline
+- [x] Pick the starting analyst — **EVA** (99.5% deterministic)
+- [x] Put bot in single-analyst mode (all others disabled in config)
+- [x] Strip surface area down to just that pipeline
 
 ---
 
