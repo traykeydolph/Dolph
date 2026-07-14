@@ -54,8 +54,8 @@
 ## Phase C: Hardening (Week 3, ~2 evenings)
 
 ### Evening 5 — Parser to 100%
-- [ ] Test suite for chosen analyst against the FRESH corpus (not just year-old validated set)
-- [ ] Every miss gets a fix or an explicit "skip this pattern" decision
+- [x] Test suite for chosen analyst against the FRESH corpus (not just year-old validated set)
+- [x] Every miss gets a fix or an explicit "skip this pattern" decision
 
 ### Evening 6 — Full Loop Dry Run
 - [ ] Live poll → parse → paper trade on Alpaca → trim/exit → Telegram alert
