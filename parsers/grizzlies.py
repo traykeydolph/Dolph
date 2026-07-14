@@ -19,7 +19,7 @@ class GrizzliesParser:
     OPTION_PATTERN = r'(?i)\b([A-Z]{1,5})\s+(?:(\d+(?:\.\d+)?)\s*[cCpP]\s+(\d{1,2}/\d{1,2})|(\d{1,2}/\d{1,2})\s+(\d+(?:\.\d+)?)\s*[cCpP])'
     ENTRY_PATTERN = r'(?i)(?:entry|entries?)[:=\s]*([0-9.,\s\-and]+)'
     TARGET_PATTERN = r'(?i)(?:targets?|TPs?)[:=\s]*([0-9.,\s\-and]+)'
-    STOP_PATTERN = r'(?i)(?:stop\s*loss|stoploss|SL)(?:[:=\s]+(?:is|at|around))?[:=\s]*(?:day\s+(?:high|low)\s+)?\$?([0-9.]+)'
+    STOP_PATTERN = r'(?i)(?:stop\s*loss|stoploss|SL)(?:[:=\s]+(?:is|at|around))?[:=\s]*(?:day\s+(?:high|low)\s+)?\$?(\d+(?:\.\d+)?|\.\d+)(?!\d)'
     
     @staticmethod
     def is_noise(message: str) -> bool:

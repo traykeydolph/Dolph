@@ -4,6 +4,7 @@ __pycache__/
 .env
 logs/
 data/*.json
+data/history_*/
 *.db
 *.db-journal
 *.db-shm
