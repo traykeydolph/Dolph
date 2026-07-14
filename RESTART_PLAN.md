@@ -14,7 +14,7 @@
 - **Alerts:** Maximum verbosity — every signal, parse decision, order, and error to Telegram. Dial down after trust is built.
 - **Paper first**, single analyst chosen by data (parse-ability ranking), evenings pace.
 - **Starting analyst: EVA** (99.5% → 100% deterministic after hardening).
-- **Paper account: "Hetzner Fresh" (PA3IW9PL70O7), $200K** — deliberately large so PDT never blocks a signal during validation; sizing fidelity enforced by 1-contract-per-trade instead. Judge Gate 1 on per-trade P&L and execution correctness, not portfolio %.
+- **Paper account: PA3OQ9Y8K2X7, $250K equity ($1M buying power via 4x margin)** — fresh account created during key setup July 13; deliberately large so PDT never blocks a signal during validation; sizing fidelity enforced by 1-contract-per-trade instead. Judge Gate 1 on per-trade P&L and execution correctness, not portfolio %. (Older "Hetzner Fresh" PA3IW9PL70O7 dashboard account is unused.)
 
 ---
 
