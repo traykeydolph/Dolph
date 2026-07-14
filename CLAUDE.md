@@ -32,7 +32,12 @@ To run the dry run (market hours 6:30am-1:00pm PT):
    Telegram alert -> position row in trading_bot.db
 5. If no signal all day, replay a historical entry from data/history_20260713/eva.json
    with a fresh timestamp through the router (ask Tray first)
-6. Report everything observed to Tray; kill the bot at market close unless told otherwise
+6. Report everything observed to Tray; kill the bot at market close unless told otherwise.
+   Stop it via the pidfile — `kill -TERM $(cat trading_bot.pid)` — which triggers graceful
+   shutdown and removes the pidfile. Do NOT use `pgrep -f "venv/bin/python main.py"`: the
+   process shows in `ps` as `.../Python main.py`, so that pattern matches nothing and the
+   bot keeps running. Confirm the stop with `cat trading_bot.pid` (should be gone) and the
+   "Bot stopped." log line.
 
 ## Deferred (do not work on unless asked)
 

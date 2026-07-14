@@ -30,8 +30,9 @@ class AlpacaClient:
         # Verify connection
         try:
             account = self.api.get_account()
-            logger.info("Connected to Alpaca: %s account, $%s buying power", 
-                       account.status, account.buying_power)
+            logger.info("Connected to Alpaca: account %s, %s, $%s equity, $%s buying power",
+                       account.account_number, account.status,
+                       account.equity, account.buying_power)
         except Exception:
             logger.exception("Failed to connect to Alpaca API")
             raise
