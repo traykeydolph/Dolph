@@ -16,6 +16,24 @@ Discord-signal-following trading bot. Polls analyst channels (Zabes, Grizzlies, 
 - Position reconciliation tool: `./venv/bin/python sync_positions.py` (dry run; `--fix` to resolve)
 - Discord auth uses a user token in `.env` (ToS-fragile; bot-account migration deferred). Verify the token with a real API call before trusting it.
 
+## Evening 6 Dry-Run Runbook (July 2026)
+
+State as of July 13 evening: Evenings 1-5 complete (see RESTART_PLAN.md). Eva parser at
+100% corpus coverage, 197 tests passing, single-analyst gating live, Alpaca paper account
+PA3OQ9Y8K2X7 ($250K, clean), DB reconciled to zero open positions, Telegram verified.
+
+To run the dry run (market hours 6:30am-1:00pm PT):
+1. Pre-flight: `./venv/bin/python -m pytest tests/ -q` (expect 197 passed) and confirm
+   `.env` has `ENABLED_ANALYSTS=eva`
+2. Start the bot in the background: `./venv/bin/python main.py` (startup health check
+   runs first and refuses to start on critical failures — read its output)
+3. Confirm from logs: watching exactly ONE channel (Eva's: 1035245170582626334)
+4. When an Eva signal arrives, verify the full chain: parse -> Alpaca paper order ->
+   Telegram alert -> position row in trading_bot.db
+5. If no signal all day, replay a historical entry from data/history_20260713/eva.json
+   with a fresh timestamp through the router (ask Tray first)
+6. Report everything observed to Tray; kill the bot at market close unless told otherwise
+
 ## Deferred (do not work on unless asked)
 
 Kalshi, SPX/Tastytrade, Nando parser, Grizzlies parser, Discord OAuth2 migration.

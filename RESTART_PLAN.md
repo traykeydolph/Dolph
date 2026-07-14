@@ -13,6 +13,8 @@
 - **Hosting:** Cloud VPS (always-on). Set up before/during paper validation.
 - **Alerts:** Maximum verbosity — every signal, parse decision, order, and error to Telegram. Dial down after trust is built.
 - **Paper first**, single analyst chosen by data (parse-ability ranking), evenings pace.
+- **Starting analyst: EVA** (99.5% → 100% deterministic after hardening).
+- **Paper account: "Hetzner Fresh" (PA3IW9PL70O7), $200K** — deliberately large so PDT never blocks a signal during validation; sizing fidelity enforced by 1-contract-per-trade instead. Judge Gate 1 on per-trade P&L and execution correctness, not portfolio %.
 
 ---
 
