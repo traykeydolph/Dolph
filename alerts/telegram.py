@@ -15,21 +15,29 @@ TELEGRAM_API = "https://api.telegram.org"
 
 
 def _sanitize_html(text: str) -> str:
-    """Escape characters that break Telegram HTML parsing, including Discord tags."""
+    """Escape characters that break Telegram HTML parsing, including Discord tags.
+
+    Intentional formatting tags (<b>, <i>, <code>, <pre>, <u>) are restored
+    after escaping so alerts render styled while arbitrary message content
+    (raw Discord text with < >) stays safely escaped."""
     import re
     # Remove Discord role/user/channel mentions that break Telegram HTML
     text = re.sub(r'<@[&!#]?\d+>', '', text)  # <@&role>, <@!user>, <@user>, <#channel>
     # Standard HTML escaping
-    return (text
+    text = (text
             .replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;"))
+    # Restore whitelisted formatting tags the bot itself emits
+    text = re.sub(r'&lt;(/?(?:b|i|u|code|pre))&gt;', r'<\1>', text)
+    return text
 
 
 class TelegramAlerter:
     """Sends formatted alerts to Telegram using the Bot HTTP API."""
 
     def __init__(self, config: Config):
+        self.config = config
         self.bot_token = config.telegram_bot_token
         self.chat_id = config.telegram_chat_id
         self._base_url = f"{TELEGRAM_API}/bot{self.bot_token}"
@@ -198,11 +206,14 @@ class TelegramAlerter:
     async def alert_startup(self) -> bool:
         """Send startup banner."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        analysts = sorted(set(self.config.channel_to_analyst.values()))
+        watching = ", ".join(a.replace("_", " ").title() for a in analysts) or "NONE (no channels enabled!)"
+        mode = "paper" if "paper" in self.config.alpaca_base_url else "LIVE"
         text = (
             f"<b>TRADING BOT ONLINE</b>\n"
             f"Started at {now}\n"
-            f"Monitoring: Grizzlies, Waxui, Enhanced Market\n"
-            f"Execution: Alpaca (paper)\n"
+            f"Monitoring: {watching}\n"
+            f"Execution: Alpaca ({mode})\n"
             f"Ready to copy-trade."
         )
         return await self.send_message(text)
