@@ -297,6 +297,21 @@ class TradingBot:
 
     # ── per-message processing ────────────────────────────────────
 
+    async def _alert_no_action(self, msg: DiscordMessage, verdict: str):
+        """Max-verbosity notification: confirm the bot saw and judged a message
+        even when no trade results. Gated by ALERT_NOISE env (default on)."""
+        if not self.config.alert_noise:
+            return
+        analyst = self.config.channel_to_analyst.get(msg.channel_id, "unknown")
+        preview = (msg.content or "").strip()
+        if not preview and msg.embeds:
+            e = msg.embeds[0]
+            preview = f"{e.get('title', '')} | {e.get('description', '')}".strip(" |")
+        preview = preview[:150] or "(empty message)"
+        await self.alerter.send_message(
+            f"👁 <b>{analyst.replace('_', ' ').title()}</b> — {verdict}\n{preview}"
+        )
+
     async def _process_message(self, msg: DiscordMessage):
         """Process a single Discord message end-to-end."""
 
@@ -349,10 +364,12 @@ class TradingBot:
 
         if signal is None:
             logger.debug("No actionable signal in message %s", msg.message_id)
+            await self._alert_no_action(msg, "no action (noise/unparseable)")
             return
 
         if signal.action == SignalAction.INFO:
             logger.debug("Info-only signal in message %s", msg.message_id)
+            await self._alert_no_action(msg, "info only — no trade")
             return
 
         logger.info("Signal: %s %s %s from %s (confidence %.2f)",

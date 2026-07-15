@@ -92,6 +92,10 @@ class Config:
     polling_interval: int = int(os.getenv("POLLING_INTERVAL", "15"))
     stale_signal_seconds: int = int(os.getenv("STALE_SIGNAL_SECONDS", "600"))  # 10 min default
 
+    # Alerts: notify on every seen-but-skipped message (max-verbosity validation
+    # mode). Set ALERT_NOISE=0 to quiet down after trust is built.
+    alert_noise: bool = os.getenv("ALERT_NOISE", "1").lower() not in ("0", "false", "no")
+
     # System
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     timezone: str = os.getenv("TIMEZONE", "US/Pacific")
