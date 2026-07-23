@@ -207,16 +207,23 @@ class TelegramAlerter:
         """Send startup banner."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         analysts = sorted(set(self.config.channel_to_analyst.values()))
-        watching = ", ".join(a.replace("_", " ").title() for a in analysts) or "NONE (no channels enabled!)"
+        executing = [a for a in analysts if not self.config.is_shadow_analyst(a)]
+        shadow = [a for a in analysts if self.config.is_shadow_analyst(a)]
+        fmt = lambda names: ", ".join(a.replace("_", " ").title() for a in names)
+        exec_line = fmt(executing) or "NONE (no channels enabled!)"
         mode = "paper" if "paper" in self.config.alpaca_base_url else "LIVE"
-        text = (
-            f"<b>TRADING BOT ONLINE</b>\n"
-            f"Started at {now}\n"
-            f"Monitoring: {watching}\n"
-            f"Execution: Alpaca ({mode})\n"
-            f"Ready to copy-trade."
-        )
-        return await self.send_message(text)
+        lines = [
+            "<b>TRADING BOT ONLINE</b>",
+            f"Started at {now}",
+            f"Executing: {exec_line}",
+        ]
+        if shadow:
+            lines.append(f"Observing (shadow — logged, NO orders): {fmt(shadow)}")
+        lines += [
+            f"Execution: Alpaca ({mode})",
+            "Ready to copy-trade.",
+        ]
+        return await self.send_message("\n".join(lines))
 
     async def alert_shutdown(self) -> bool:
         """Send shutdown notification."""

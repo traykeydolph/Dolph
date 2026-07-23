@@ -1,19 +1,29 @@
 # Current Status — Trading Bot
 
-*Single orientation doc. Last updated: 2026-07-22 (morning). Read this + `CLAUDE.md` +
+*Single orientation doc. Last updated: 2026-07-22 (EOD). Read this + `CLAUDE.md` +
 `RESTART_PLAN.md` at the start of any session. Keep the "Where we are" and "Open items"
 sections current — this file, not chat history, is the source of truth for continuity.*
 
 ---
 
 ## Where we are (TL;DR)
-- Bot was "down all week" — root cause was a **stale `trading_bot.pid`** (dead process blocking
-  restart), not a bug. Cleared. 367 tests pass.
-- **Three analysts wired and validated (2026-07-21 night):** Eva + Ace **execute** on Alpaca
-  paper; Waxui runs **shadow / log-only** (parses, alerts `[SHADOW]`, logs — never orders).
-- Account flat (0 in DB / 0 on Alpaca). Nothing committed to git yet.
-- **Next:** run the first real paper session (premarket start), and watch the **first Ace
-  lifecycle** end-to-end (parse → paper order → Telegram → position row).
+- **First real paper session ran 2026-07-22** (up 07:10 CT → clean shutdown). Three analysts
+  live: Eva + Ace **execute** on Alpaca paper; Waxui runs **shadow / log-only** (never orders).
+- **Gate 1: Day 1/5 clean · 1/5 lifecycles. Streak ADVANCES (not reset)** — zero parser errors,
+  zero silent failures.
+- **Eva IWM 300C 7/24 — full lifecycle verified.** Entry 08:39 → exit 09:56 CT, P&L **−$17**
+  (a clean mechanical loss). Whole chain clean: regex parse (no Gemini), limit fill, no
+  15s→market escalation, post-exit Alpaca verification, DB row, journal, Sheets. The
+  position-aware **safety guard fired correctly** on 2 phantom-T trims (Eva trimmed a T call the
+  bot never held → parsed fine, execution declined, logged `WARNING`, no order).
+- **Ace: still pending its first live signal.** Silent today (0 messages); Ace posts ~1.8
+  entries/wk so this is expected, not a fault. First Ace lifecycle remains the open milestone.
+- **Waxui shadow: 17 real observations, 0 orders.** Tiers regex 6 / would-hit-Gemini 7 /
+  noise 4; of the 6 parsed, **4 were SPX/index (unexecutable)** — reconfirms shadow-only.
+- Account flat (0 in DB / 0 on Alpaca).
+- **Committed** to branch `feat/ace-parser-and-waxui-shadow`. Push + PR pending a one-time
+  `gh auth login` (gh not yet authenticated on this machine).
+- **Next:** run day 2/5; catch the **first Ace lifecycle** end-to-end whenever Ace next posts.
 
 ## Config (live)
 - `.env`: `ENABLED_ANALYSTS=eva,ace`, `SHADOW_ANALYSTS=waxui`, `CONTRACTS_ACE=1`
@@ -70,14 +80,21 @@ prose-heavy (46.6% ambiguity) → analyst #3.
 1. **LIVE-GATE:** `execute_entry_order()` escalates limit → **market** after 15s. On fast/0DTE
    options this bleeds edge; paper hides it (idealized fills). Before real money, switch to a
    **capped marketable-limit** (pay up to X% over signal, else skip).
-2. **Double teardown on SIGTERM** — harmless/idempotent now; fix before unattended VPS.
-3. **Startup Telegram banner** doesn't tag Waxui as `[SHADOW]` — add so execute/observe is
-   visible at a glance ("Monitoring: Ace, Eva, Waxui / Ready to copy-trade" is misleading).
+2. **Double teardown on SIGTERM** — CONFIRMED still present (2026-07-22: "Bot stopped." logged
+   twice on clean shutdown). Harmless/idempotent now; fix before unattended VPS.
+3. ~~Startup Telegram banner doesn't tag Waxui as `[SHADOW]`.~~ **DONE (2026-07-22):** banner now
+   splits `Executing:` vs `Observing (shadow — logged, NO orders):`. Cosmetic only; routing
+   unchanged.
 4. **Ace expiry-correction in a later message** (2/383): parser holds the first contract. Watch
    via max-verbosity alerts; future cross-message correction handler.
 5. **No Ace signal library** in `obsidian_matcher` yet (harmless; regex covers it).
-6. Two `replay_`-prefixed rows may sit in `waxui_shadow.jsonl` from verification — clear for a
-   clean dataset.
+6. **Logging path consolidation:** the live canonical log is `trading_bot.log` (project root,
+   `RotatingFileHandler` in `main.py`). The old `logs/bot.log` was orphaned (nothing wrote it
+   since Feb 19) and has been **deleted** — there is now ONE log. `.gitignore` covers it.
+7. **Timezone convention (audit note):** `trading_bot.log` is in **CT** (local), `trading_bot.db`
+   timestamps are **UTC**. E.g. today's Eva entry: log `08:39 CT` = DB `13:39 UTC`. Left as-is
+   deliberately — changing timestamp formats mid-validation would split the streak's dataset.
+   **DEFERRED:** normalize to one zone (likely UTC everywhere) after Gate 1.
 
 ## 3-month goal (~Oct 2026)
 All three trading **real money**. Eva + Ace realistic; **Waxui is the long pole** — needs a

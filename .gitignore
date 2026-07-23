@@ -19,6 +19,7 @@ bot_stdout.log
 trading_bot.out
 bot.log
 *.log
+*.jsonl
 *.pid
 .DS_Store
 
