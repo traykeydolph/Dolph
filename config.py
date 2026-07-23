@@ -18,6 +18,7 @@ class Config:
     discord_channel_eva: str = os.getenv("DISCORD_CHANNEL_EVA", "")
     discord_channel_nando: str = os.getenv("DISCORD_CHANNEL_NANDO", "")
     discord_channel_zabes: str = os.getenv("DISCORD_CHANNEL_ZABES", "")
+    discord_channel_ace: str = os.getenv("DISCORD_CHANNEL_ACE", "")
 
     # Gemini
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
@@ -73,6 +74,7 @@ class Config:
     contracts_eva: int = int(os.getenv("CONTRACTS_EVA", "1"))
     contracts_nando: int = int(os.getenv("CONTRACTS_NANDO", "1"))
     contracts_zabes: int = int(os.getenv("CONTRACTS_ZABES", "1"))
+    contracts_ace: int = int(os.getenv("CONTRACTS_ACE", "1"))
     position_size_ecs: float = float(os.getenv("POSITION_SIZE_ECS", "10"))  # $10/play ECS crypto
 
     # Risk management
@@ -108,9 +110,44 @@ class Config:
         raw = os.getenv("ENABLED_ANALYSTS", "")
         return {a.strip().lower() for a in raw.split(",") if a.strip()}
 
+    # Shadow / log-only analysts — SHADOW_ANALYSTS env var (comma-separated).
+    # These channels ARE polled, parsed, alerted and logged, but their signals
+    # NEVER reach order execution. This is a separate axis from
+    # ENABLED_ANALYSTS: shadow is observation, enabled is execution.
+    @property
+    def shadow_analysts(self) -> set[str]:
+        raw = os.getenv("SHADOW_ANALYSTS", "")
+        return {a.strip().lower() for a in raw.split(",") if a.strip()}
+
+    def is_shadow_analyst(self, analyst: str) -> bool:
+        return analyst.lower() in self.shadow_analysts
+
     def _analyst_enabled(self, analyst: str) -> bool:
+        """Execution gate. Shadow analysts are NEVER executable, even if they
+        also appear in ENABLED_ANALYSTS — observation always wins."""
+        if self.is_shadow_analyst(analyst):
+            return False
         enabled = self.enabled_analysts
         return not enabled or analyst in enabled
+
+    def _analyst_observed(self, analyst: str) -> bool:
+        """Polling gate: executable analysts plus shadow analysts."""
+        return self._analyst_enabled(analyst) or self.is_shadow_analyst(analyst)
+
+    @property
+    def shadow_channels(self) -> list[str]:
+        """Channel IDs polled for observation only."""
+        return [
+            ch for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self.is_shadow_analyst(analyst)
+        ]
+
+    def is_shadow_channel(self, channel_id: str) -> bool:
+        """True if this channel must bypass order execution entirely."""
+        for ch, analyst in self._discord_channel_analyst_pairs:
+            if ch and ch == channel_id:
+                return self.is_shadow_analyst(analyst)
+        return False
 
     @property
     def _discord_channel_analyst_pairs(self) -> list[tuple[str, str]]:
@@ -122,6 +159,7 @@ class Config:
             (self.discord_channel_eva, "eva"),
             (self.discord_channel_nando, "nando"),
             (self.discord_channel_zabes, "zabes"),
+            (self.discord_channel_ace, "ace"),
         ]
 
     # Channel → analyst mapping
@@ -130,7 +168,7 @@ class Config:
         mapping = {
             ch: analyst
             for ch, analyst in self._discord_channel_analyst_pairs
-            if ch and self._analyst_enabled(analyst)
+            if ch and self._analyst_observed(analyst)
         }
         # Merge Telegram channel→analyst mappings (same gating)
         mapping.update({
@@ -144,7 +182,7 @@ class Config:
     def watched_channels(self) -> list[str]:
         discord = [
             ch for ch, analyst in self._discord_channel_analyst_pairs
-            if ch and self._analyst_enabled(analyst)
+            if ch and self._analyst_observed(analyst)
         ]
         # Telegram channels (prefixed tg_): when analyst gating is active, only
         # watch channels whose mapped analyst is enabled — unmapped channels
@@ -166,7 +204,7 @@ class Config:
         """Only Discord channels — used by discord_poller (excludes Telegram)."""
         return [
             ch for ch, analyst in self._discord_channel_analyst_pairs
-            if ch and self._analyst_enabled(analyst)
+            if ch and self._analyst_observed(analyst)
         ]
 
     # Waxui trim schedule

@@ -36,3 +36,56 @@ short-circuit → Obsidian signal library → regex extractors) with NO LLM invo
 - Raw corpus: `data/history_20260713/<analyst>.json` (pull tool: `pull_history.py`)
 - Full stats incl. per-analyst breakdowns: scratchpad `parseability_results.json`
   (regenerate anytime: `analyze_parseability.py` against the corpus)
+
+---
+
+# Addendum — Analyst #2 Bake-off (July 21, 2026)
+
+**Task:** pick the parser to build *behind* Eva. Fresh 1,000-msg pull (383 for Ace —
+whole channel) of the three candidates through the same deterministic tiers, NO LLM.
+Corpus: `data/history_20260721/{waxui,ace,luigi}.json`. Tool: `analyze_parseability.py`
++ `scratchpad/diag.py` (ambiguous-bucket vocabulary probe).
+
+**Metrics.** "Signals" = entries + trims + exits detected (struct + ambiguous prose).
+- *Clean out-of-box* = signals a generic regex fully extracts today.
+- *Achievable* = clean + prose signals reachable by a dedicated parser
+  (instrument + a bounded action-verb table + price/% marker present).
+- *Ambiguity rate* = trade-related messages not machine-clean (would hit Gemini).
+
+| Rank | Analyst | Signals/wk | Clean out-of-box | Achievable w/ parser | Ambiguity | Executable on Alpaca? | Verdict |
+|------|---------|-----------|------------------|----------------------|-----------|-----------------------|---------|
+| 🥇 1 | **Waxui** | 27 | **93.3%** | 93.3% | 2.5% | **Partial** — SPY ok, SPX (its #2 name, ~148 mentions) blocked | Best numbers, wrong next build (see below) |
+| 🥈 2 | **Ace** | 5.8 | 28.6% | **79.5%** | 20.9% | **Yes** — AAPL/AMZN/AMD/GOOGL equity opts | **Recommended #2.** Cleanest greenfield format |
+| 3 | **Luigi** (blind) | 12.8 | 3.7% | 65.1% | **46.6%** | **Yes** — IWM/SPY/QQQ/META, no SPX | Richest volume, messiest signal layer — defer to #3 |
+
+Existing Waxui parser on the FRESH pull (real bot code, `is_noise`+`extract_details`):
+**65.8% deterministic** (238 noise-skip + 420 regex-extract, 342 → Gemini) — consistent
+with the 70.3% from July 13 (format drift + newer window). The generic classifier's
+93% overstates Waxui because it counts commentary as clean-noise and is generous on trim
+lines the real parser drops; **65.8% is Waxui's ground truth.**
+
+## Recommendation: build **Ace** as analyst #2
+
+- **Parse-ability ranking is Waxui > Ace > Luigi**, but the #1 doesn't convert:
+  Waxui is a *hardening* job (not greenfield), it's 0DTE SPX/SPY (fill-speed hostile to
+  a poller), and SPX index options aren't executable on Alpaca (Tastytrade is deferred).
+  Revisit Waxui when Tastytrade lands.
+- **Ace is the cleanest greenfield build.** Entries are textbook and 100% machine-clean
+  (`BTO $AAPL 267.5c 03/04 @0.11`); every name is an Alpaca-executable equity option.
+  Its exits are prose (no STC) but a *bounded* vocabulary — ✅ / `up X%` / `all out` /
+  `out on $TICKER @price` — and under the bot's 1-contract model they collapse to
+  "flatten on any trim/exit marker," so you never need to extract fractions. That pushes
+  achievable coverage to ~80% with a small parser. Only weakness: ~1.8 entries/wk — but
+  low volume *suited* Eva's validation too (enough lifecycles without drowning).
+- **Luigi is the tempting trap.** Clean BTO entries and a gift of a format —
+  every management msg self-labels its contract (`$TICKER M/DD $STRIKEc - Update:`), so
+  position mapping is trivial. But the *action* is prose across a wide vocabulary
+  (adding / closing runners / selling 1/2 / "exit at open" / "SL @ entries"), giving the
+  highest ambiguity of the three (46.6%) and only 3.7% clean out-of-box. It's the richest
+  channel but the least *reliable* to parse deterministically. Good analyst #3 once Ace
+  proves the greenfield playbook.
+
+**Luigi (the unknown) result:** promising, not next. Textbook entries + self-labeling
+update headers, undone by a prose-dominated management layer.
+
+Data: `scratchpad/parseability_results.json` (regen: `analyze_parseability.py waxui ace luigi`).

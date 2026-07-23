@@ -13,12 +13,16 @@ from config import Config
 @pytest.fixture
 def gated_eva(monkeypatch):
     monkeypatch.setenv("ENABLED_ANALYSTS", "eva")
+    # Shadow analysts are polled too — clear them so this fixture tests the
+    # execution gate in isolation (see tests/test_shadow_mode.py).
+    monkeypatch.setenv("SHADOW_ANALYSTS", "")
     return Config()
 
 
 @pytest.fixture
 def ungated(monkeypatch):
     monkeypatch.setenv("ENABLED_ANALYSTS", "")
+    monkeypatch.setenv("SHADOW_ANALYSTS", "")
     return Config()
 
 

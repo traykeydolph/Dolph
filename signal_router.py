@@ -14,6 +14,7 @@ from parsers.waxui import WaxuiParser
 from parsers.grizzlies import GrizzliesParser
 from parsers.zabes import ZabesParser
 from parsers.eva import EvaParser
+from parsers.ace import AceParser
 from parsers.obsidian_matcher import match as obsidian_match, append_to_library
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,9 @@ class SignalRouter:
         if analyst == "eva" and EvaParser.is_noise(parse_content):
             logger.info("Eva noise short-circuit: %s", message_id)
             return None
+        if analyst == "ace" and AceParser.is_noise(parse_content):
+            logger.info("Ace noise short-circuit (recap): %s", message_id)
+            return None
         # Image-only messages (Discord CDN with no signal)
         if parse_content.strip().startswith('https://cdn.discordapp.com/') and '\n' not in parse_content.strip():
             logger.debug("Image-only message, skipping: %s", message_id)
@@ -121,23 +125,13 @@ class SignalRouter:
             
             # For actionable signals (ENTRY/TRIM/EXIT), try regex extraction first (FREE)
             # Only fall back to Gemini if regex can't extract details
-            signal = None
-            regex_extractors = {
-                "waxui": WaxuiParser.extract_details,
-                "zabes": ZabesParser.extract_details,
-                "grizzlies": GrizzliesParser.extract_details,
-                "eva": EvaParser.extract_details,
-            }
-            
-            extractor = regex_extractors.get(analyst)
-            if extractor:
-                signal = extractor(parse_content, message_id, timestamp)
-                if signal:
-                    # Override action with library classification (regex may disagree)
-                    signal.action = action
-                    signal.confidence = max(signal.confidence, 0.92)
-                    logger.info("Library match → %s (Tier %d) + regex extraction — NO Gemini needed: %s",
-                               library_match.signal_type, library_match.tier, message_id)
+            signal = self._run_regex_extractor(analyst, parse_content, message_id, timestamp)
+            if signal:
+                # Override action with library classification (regex may disagree)
+                signal.action = action
+                signal.confidence = max(signal.confidence, 0.92)
+                logger.info("Library match → %s (Tier %d) + regex extraction — NO Gemini needed: %s",
+                           library_match.signal_type, library_match.tier, message_id)
             
             if not signal:
                 # Regex couldn't extract — fall back to Gemini with hint
@@ -152,19 +146,10 @@ class SignalRouter:
                     signal.confidence = max(signal.confidence, 0.9)
         else:
             # === TIER 2.5: Try regex extraction BEFORE Gemini (free, instant) ===
-            signal = None
-            regex_extractors_t25 = {
-                "waxui": WaxuiParser.extract_details,
-                "zabes": ZabesParser.extract_details,
-                "grizzlies": GrizzliesParser.extract_details,
-                "eva": EvaParser.extract_details,
-            }
-            extractor = regex_extractors_t25.get(analyst)
-            if extractor:
-                signal = extractor(parse_content, message_id, timestamp)
-                if signal:
-                    logger.info("Regex extraction (no library match) → %s %s — NO Gemini needed: %s",
-                               signal.action, signal.ticker, message_id)
+            signal = self._run_regex_extractor(analyst, parse_content, message_id, timestamp)
+            if signal:
+                logger.info("Regex extraction (no library match) → %s %s — NO Gemini needed: %s",
+                           signal.action, signal.ticker, message_id)
 
             # === TIER 3: Full Gemini parsing (no library or regex match) ===
             if not signal:
@@ -237,6 +222,122 @@ class SignalRouter:
         logger.debug("No parseable signal found in message %s", message_id)
         return None
     
+    # ── SHADOW / LOG-ONLY classification ──────────────────────────────
+    # Mirrors the tier logic of route_message but stops BEFORE Gemini and
+    # returns the tier that handled the message. It never touches execution:
+    # it returns data, and main.py's shadow branch returns before dispatch.
+
+    TIER_NOISE = "noise-skip"
+    TIER_REGEX = "regex-extract"
+    TIER_GEMINI = "would-hit-Gemini"
+    TIER_UNPARSED = "unparsed"
+
+    def classify_shadow(self, channel_id: str, message_id: str, content: str,
+                        timestamp: str, embeds: list = None,
+                        referenced_message: str = None) -> tuple[Optional[ParsedSignal], str]:
+        """Parse for observation only. Returns (signal_or_None, tier).
+
+        Gemini is deliberately NOT called — a message that would reach Tier 3
+        is recorded as 'would-hit-Gemini' so the shadow log measures how much
+        LLM fallback a live run would need, without spending on it.
+        """
+        analyst = self.config.channel_to_analyst.get(channel_id, "unknown")
+
+        if not content.strip() and not embeds:
+            return None, self.TIER_NOISE
+
+        if embeds:
+            structured = self._extract_embed_content(embeds)
+            if structured:
+                content = structured
+
+        parse_content = self.ticker_decoder.decode_message(content, channel_id)
+        if referenced_message and referenced_message.strip():
+            decoded_ref = self.ticker_decoder.decode_message(referenced_message, channel_id)
+            parse_content = f"[Replying to: {decoded_ref.strip()}]\n\n{parse_content}"
+
+        noise_checks = {
+            "waxui": WaxuiParser.is_noise,
+            "grizzlies": GrizzliesParser.is_noise,
+            "zabes": ZabesParser.is_noise,
+            "eva": EvaParser.is_noise,
+            "ace": AceParser.is_noise,
+        }
+        is_noise = noise_checks.get(analyst)
+        if is_noise and is_noise(parse_content):
+            return None, self.TIER_NOISE
+
+        library_match = obsidian_match(parse_content, analyst)
+        if library_match and library_match.signal_type == "NOISE":
+            return None, self.TIER_NOISE
+
+        signal = self._run_regex_extractor(analyst, parse_content, message_id, timestamp)
+        if signal:
+            if library_match:
+                action_map = {
+                    "ENTRY": SignalAction.ENTRY.value,
+                    "TRIM": SignalAction.TRIM.value,
+                    "EXIT": SignalAction.EXIT.value,
+                }
+                signal.action = action_map.get(library_match.signal_type, signal.action)
+            return signal, self.TIER_REGEX
+
+        if library_match:
+            # Library says it's actionable but regex couldn't pull the details —
+            # a live run would spend a Gemini call here.
+            return None, self.TIER_GEMINI
+
+        return None, self.TIER_UNPARSED
+
+    # Analysts with a free deterministic regex parser, tried before Gemini.
+    REGEX_EXTRACTORS = {
+        "waxui": WaxuiParser.extract_details,
+        "zabes": ZabesParser.extract_details,
+        "grizzlies": GrizzliesParser.extract_details,
+        "eva": EvaParser.extract_details,
+        "ace": AceParser.extract_details,
+    }
+
+    def _run_regex_extractor(self, analyst: str, content: str, message_id: str,
+                             timestamp: str) -> Optional[ParsedSignal]:
+        """Run the analyst's regex parser, if it has one.
+
+        Ace is the one parser that needs position context: he names the ticker
+        on winners ("$AAPL up 40% ✅") but routinely omits it when cutting a
+        loser ("cutting here -30% 🛑"). Those tickerless exits resolve against
+        the single open Ace position — so the router has to hand them over.
+        """
+        extractor = self.REGEX_EXTRACTORS.get(analyst)
+        if not extractor:
+            return None
+        if analyst == "ace":
+            return extractor(content, message_id, timestamp,
+                             open_tickers=self._open_tickers("ace"))
+        return extractor(content, message_id, timestamp)
+
+    def _open_tickers(self, analyst: str) -> set:
+        """Tickers this analyst currently holds an open position in.
+
+        Returns an empty set on any failure — a tickerless exit is then skipped
+        loudly rather than resolved against stale or missing state.
+        """
+        try:
+            from storage.database import Database
+            db = Database(getattr(self.config, "db_path", "trading_bot.db"))
+            try:
+                return {
+                    p["ticker"].upper() for p in db.get_open_positions()
+                    if p.get("analyst") == analyst and p.get("ticker")
+                }
+            finally:
+                db.close()
+        except Exception:
+            logger.warning(
+                "Could not read open positions for %s — tickerless exits will be "
+                "skipped, positions may stay OPEN", analyst,
+            )
+            return set()
+
     def _extract_embed_content(self, embeds: list) -> Optional[str]:
         """Extract structured content from Discord embeds (Enhanced Market)."""
         try:

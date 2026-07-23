@@ -36,6 +36,7 @@ CHANNELS = {
     "eva": os.getenv("DISCORD_CHANNEL_EVA") or "1035245170582626334",
     "nando": os.getenv("DISCORD_CHANNEL_NANDO") or "1139560883127857304",
     "ace": os.getenv("DISCORD_CHANNEL_ACE") or "1478050123786485831",
+    "luigi": os.getenv("DISCORD_CHANNEL_LUIGI") or "1381991882237939832",
 }
 
 
@@ -77,7 +78,16 @@ def fetch_history(session: requests.Session, channel_id: str, limit: int) -> lis
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=2000, help="max messages per channel")
+    ap.add_argument("--only", type=str, default="",
+                    help="comma-separated analyst names to pull (default: all)")
     args = ap.parse_args()
+
+    only = {a.strip() for a in args.only.split(",") if a.strip()}
+    channels = {k: v for k, v in CHANNELS.items() if not only or k in only}
+    if only:
+        missing = only - set(CHANNELS)
+        if missing:
+            sys.exit(f"Unknown analyst(s): {', '.join(sorted(missing))}")
 
     token = os.getenv("DISCORD_USER_TOKEN")
     if not token:
@@ -90,7 +100,7 @@ def main() -> None:
     session.headers.update({"Authorization": token, "User-Agent": USER_AGENT})
 
     summary = {}
-    for analyst, channel_id in CHANNELS.items():
+    for analyst, channel_id in channels.items():
         print(f"Pulling {analyst} (channel {channel_id})...", file=sys.stderr)
         msgs = fetch_history(session, channel_id, args.limit)
         out_file = out_dir / f"{analyst}.json"

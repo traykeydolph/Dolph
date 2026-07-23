@@ -1,5 +1,8 @@
 # Trading Bot — Project Context
 
+> **Start here:** read `CURRENT_STATUS.md` first — it's the single orientation doc (current
+> config, what's built, how to run, what to watch, open decisions). Keep it updated.
+
 Discord-signal-following trading bot. Polls analyst channels (Zabes, Grizzlies, Waxui, ECS, Nando, Enhanced Market), parses calls into structured signals (entries/trims/exits) via per-analyst regex parsers with Gemini LLM fallback, executes via Alpaca. Kalshi prediction-market bot exists in parallel (currently deferred).
 
 ## Current Strategy (as of July 2026)
