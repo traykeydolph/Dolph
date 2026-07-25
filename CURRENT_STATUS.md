@@ -90,13 +90,16 @@ prose-heavy (46.6% ambiguity) → analyst #3.
 - tests: `test_ace.py`, `test_ace_corpus.py`, `test_shadow_mode.py` — 367 total pass.
 
 ## 🔴 PRE-LIVE BLOCKERS → see `LIVE_SAFETY.md`
-Three defects that **paper trading hides** and that **must be fixed + verified before real
+Four defects that **paper trading hides** and that **must be fixed + verified before real
 money** now live in **`LIVE_SAFETY.md`** (the go-live checklist — none may be waived):
 1. **Missed exit on restart** — cursor is in-memory only; a restart during downtime skips a
    close permanently, and there is **no broker/option stop backstop**. *Can lose principal —
    hard stop for going live.*
 2. **P&L recorded off signal price, not fill** (07-24 GOOGL: fill $0.79, booked $0.70).
 3. **Limit→market escalation after 15s** — bleeds edge on fast fills.
+4. **External calls have no timeout** (07-24) — the Gemini fallback blocks on connect with no
+   timeout; a network blip can hang message processing. Surfaced as a >2min test-suite hang
+   (normally 0.89s) on a live Gemini call stuck in `socket.create_connection`.
 Do **not** fix these during Gate-1 (execution logic frozen); `LIVE_SAFETY.md` is the plan for
 the paper→live transition.
 

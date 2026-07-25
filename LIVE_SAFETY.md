@@ -1,7 +1,7 @@
 # LIVE_SAFETY.md — Pre-Live Safety Gate
 
 > **Purpose:** the go-live checklist. Every blocker below must be **fixed and verified**
-> before this bot trades real money. **None may be waived.** Paper trading hides all three —
+> before this bot trades real money. **None may be waived.** Paper trading hides all of them —
 > that is exactly why they are dangerous.
 >
 > Created 2026-07-24 (found during Gate-1 paper validation). Do **not** implement fixes while
@@ -15,6 +15,40 @@
 | 1 | Missed exit on restart | **Loss of principal** — position held open, no one watching | 🔴 OPEN |
 | 2 | P&L recorded off signal, not fill | Corrupted track record (the thing we plan to monetize) | 🔴 OPEN |
 | 3 | Limit→market escalation after 15s | Silent edge-bleed on fast fills | 🔴 OPEN |
+| 4 | External calls have no timeout | A network blip can **hang message processing** indefinitely | 🔴 OPEN |
+
+---
+
+## BLOCKER 4 — External calls have no connection timeout 🔴
+
+### Failure mode
+The Gemini LLM fallback makes a **blocking network call with no connection timeout**. When the
+network can resolve DNS but not complete the TCP/TLS connection (exactly the 07-23 blip
+condition), the call **hangs indefinitely** instead of failing fast.
+
+**Evidence (found 2026-07-24):** the test suite — normally 0.89s — hung for >2min on router
+tests that reach the fallback. Stack: `signal_router.py:156` → `parsers/gemini_parser.py:79`
+→ `google.genai` → `httpx` → `socket.create_connection` (blocked on connect). `gemini_parser`
+catches *failures* (`:95` → returns `None`), so a fast refusal is harmless — but a **hang** is
+not caught, because there is no timeout to convert it into a failure.
+
+Production cousin: an analyst posts a message that needs the LLM fallback during a network
+blip → `route_message` blocks → the processing path stalls. Unverified whether the 60s poll
+watchdog (`main.py:277`) actually wraps this call; **must confirm** — if it doesn't, a single
+message can freeze the bot.
+
+### Fix
+- Set an explicit **connect + read timeout** on the genai/httpx client (e.g. 10s), so a bad
+  connection raises promptly and `gemini_parser`'s existing `except` returns `None`.
+- Verify (or add) a hard timeout around `route_message`/message processing so no single message
+  can block the loop, independent of which external call stalls.
+- Make the test suite hermetic: mock the Gemini client in router-wiring tests so the suite never
+  depends on live network (it currently makes real API calls).
+
+### Verification
+- With the network forced to hang on connect, `route_message` returns within the timeout (not
+  indefinitely) and the message is handled/skipped, not blocked.
+- Full test suite runs offline with no live network calls.
 
 ---
 
@@ -113,6 +147,6 @@ On a fast mover, the order either fills within the cap or is skipped + alerted; 
 ---
 
 ## Go-live rule
-Live trading is gated on **all three blockers 🟢 VERIFIED** *and* Gate 1 passed (5 clean market
+Live trading is gated on **all four blockers 🟢 VERIFIED** *and* Gate 1 passed (5 clean market
 days, 5+ complete lifecycles, zero parser errors, zero silent failures). Blocker 1 is the hard
 stop — it is the only one that can lose principal.
