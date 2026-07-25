@@ -14,6 +14,7 @@ from parsers.grizzlies import GrizzliesParser
 from parsers.enhanced_market import EnhancedMarketParser
 from parsers.ecs import ECSParser
 from parsers.eva import EvaParser
+from parsers.ace import AceParser
 from parsers.nando import NandoParser
 from parsers.zabes import ZabesParser
 
@@ -159,6 +160,8 @@ If this is not a tradeable signal (just commentary, chat, etc.), respond with: {
             base_prompt = ECSParser.enhance_prompt(base_prompt, message)
         elif analyst == "eva":
             base_prompt = EvaParser.enhance_prompt(base_prompt, message)
+        elif analyst == "ace":
+            base_prompt = AceParser.enhance_prompt(base_prompt, message)
         elif analyst == "nando":
             base_prompt = NandoParser.enhance_prompt(base_prompt, message)
         elif analyst == "zabes":

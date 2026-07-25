@@ -18,6 +18,7 @@ class Config:
     discord_channel_eva: str = os.getenv("DISCORD_CHANNEL_EVA", "")
     discord_channel_nando: str = os.getenv("DISCORD_CHANNEL_NANDO", "")
     discord_channel_zabes: str = os.getenv("DISCORD_CHANNEL_ZABES", "")
+    discord_channel_ace: str = os.getenv("DISCORD_CHANNEL_ACE", "")
 
     # Gemini
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
@@ -73,6 +74,7 @@ class Config:
     contracts_eva: int = int(os.getenv("CONTRACTS_EVA", "1"))
     contracts_nando: int = int(os.getenv("CONTRACTS_NANDO", "1"))
     contracts_zabes: int = int(os.getenv("CONTRACTS_ZABES", "1"))
+    contracts_ace: int = int(os.getenv("CONTRACTS_ACE", "1"))
     position_size_ecs: float = float(os.getenv("POSITION_SIZE_ECS", "10"))  # $10/play ECS crypto
 
     # Risk management
@@ -92,55 +94,118 @@ class Config:
     polling_interval: int = int(os.getenv("POLLING_INTERVAL", "15"))
     stale_signal_seconds: int = int(os.getenv("STALE_SIGNAL_SECONDS", "600"))  # 10 min default
 
+    # Alerts: notify on every seen-but-skipped message (max-verbosity validation
+    # mode). Set ALERT_NOISE=0 to quiet down after trust is built.
+    alert_noise: bool = os.getenv("ALERT_NOISE", "1").lower() not in ("0", "false", "no")
+
     # System
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     timezone: str = os.getenv("TIMEZONE", "US/Pacific")
     db_path: str = os.getenv("DB_PATH", "trading_bot.db")
 
+    # Analyst gating — ENABLED_ANALYSTS env var (comma-separated, e.g. "eva").
+    # Empty/unset = all analysts enabled (backward compatible).
+    @property
+    def enabled_analysts(self) -> set[str]:
+        raw = os.getenv("ENABLED_ANALYSTS", "")
+        return {a.strip().lower() for a in raw.split(",") if a.strip()}
+
+    # Shadow / log-only analysts — SHADOW_ANALYSTS env var (comma-separated).
+    # These channels ARE polled, parsed, alerted and logged, but their signals
+    # NEVER reach order execution. This is a separate axis from
+    # ENABLED_ANALYSTS: shadow is observation, enabled is execution.
+    @property
+    def shadow_analysts(self) -> set[str]:
+        raw = os.getenv("SHADOW_ANALYSTS", "")
+        return {a.strip().lower() for a in raw.split(",") if a.strip()}
+
+    def is_shadow_analyst(self, analyst: str) -> bool:
+        return analyst.lower() in self.shadow_analysts
+
+    def _analyst_enabled(self, analyst: str) -> bool:
+        """Execution gate. Shadow analysts are NEVER executable, even if they
+        also appear in ENABLED_ANALYSTS — observation always wins."""
+        if self.is_shadow_analyst(analyst):
+            return False
+        enabled = self.enabled_analysts
+        return not enabled or analyst in enabled
+
+    def _analyst_observed(self, analyst: str) -> bool:
+        """Polling gate: executable analysts plus shadow analysts."""
+        return self._analyst_enabled(analyst) or self.is_shadow_analyst(analyst)
+
+    @property
+    def shadow_channels(self) -> list[str]:
+        """Channel IDs polled for observation only."""
+        return [
+            ch for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self.is_shadow_analyst(analyst)
+        ]
+
+    def is_shadow_channel(self, channel_id: str) -> bool:
+        """True if this channel must bypass order execution entirely."""
+        for ch, analyst in self._discord_channel_analyst_pairs:
+            if ch and ch == channel_id:
+                return self.is_shadow_analyst(analyst)
+        return False
+
+    @property
+    def _discord_channel_analyst_pairs(self) -> list[tuple[str, str]]:
+        return [
+            (self.discord_channel_grizzlies, "grizzlies"),
+            (self.discord_channel_waxui, "waxui"),
+            (self.discord_channel_em, "enhanced_market"),
+            (self.discord_channel_ecs, "ecs"),
+            (self.discord_channel_eva, "eva"),
+            (self.discord_channel_nando, "nando"),
+            (self.discord_channel_zabes, "zabes"),
+            (self.discord_channel_ace, "ace"),
+        ]
+
     # Channel → analyst mapping
     @property
     def channel_to_analyst(self) -> dict[str, str]:
         mapping = {
-            self.discord_channel_grizzlies: "grizzlies",
-            self.discord_channel_waxui: "waxui",
-            self.discord_channel_em: "enhanced_market",
-            self.discord_channel_ecs: "ecs",
-            self.discord_channel_eva: "eva",
-            self.discord_channel_nando: "nando",
-            self.discord_channel_zabes: "zabes",
+            ch: analyst
+            for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self._analyst_observed(analyst)
         }
-        # Merge Telegram channel→analyst mappings
-        mapping.update(self.telegram_channel_to_analyst)
-        # Filter out empty channel IDs
-        return {k: v for k, v in mapping.items() if k}
+        # Merge Telegram channel→analyst mappings (same gating)
+        mapping.update({
+            ch: analyst
+            for ch, analyst in self.telegram_channel_to_analyst.items()
+            if self._analyst_enabled(analyst)
+        })
+        return mapping
 
     @property
     def watched_channels(self) -> list[str]:
         discord = [
-            self.discord_channel_grizzlies,
-            self.discord_channel_waxui,
-            self.discord_channel_em,
-            self.discord_channel_ecs,
-            self.discord_channel_eva,
-            self.discord_channel_nando,
-            self.discord_channel_zabes,
+            ch for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self._analyst_observed(analyst)
         ]
-        # Include Telegram channels (prefixed with tg_) so signal_router accepts them
-        telegram = [f"tg_{ch}" for ch in self.telegram_signal_channels]
-        return [ch for ch in discord + telegram if ch and ch != "tg_"]
+        # Telegram channels (prefixed tg_): when analyst gating is active, only
+        # watch channels whose mapped analyst is enabled — unmapped channels
+        # can't be attributed to an analyst, so they're excluded under gating.
+        tg_map = self.telegram_channel_to_analyst
+        telegram = []
+        for ch in self.telegram_signal_channels:
+            key = f"tg_{ch}"
+            analyst = tg_map.get(key)
+            if analyst is None:
+                if not self.enabled_analysts:
+                    telegram.append(key)
+            elif self._analyst_enabled(analyst):
+                telegram.append(key)
+        return discord + telegram
 
     @property
     def discord_only_channels(self) -> list[str]:
         """Only Discord channels — used by discord_poller (excludes Telegram)."""
-        return [ch for ch in [
-            self.discord_channel_grizzlies,
-            self.discord_channel_waxui,
-            self.discord_channel_em,
-            self.discord_channel_ecs,
-            self.discord_channel_eva,
-            self.discord_channel_nando,
-            self.discord_channel_zabes,
-        ] if ch]
+        return [
+            ch for ch, analyst in self._discord_channel_analyst_pairs
+            if ch and self._analyst_observed(analyst)
+        ]
 
     # Waxui trim schedule
     WAXUI_TRIM_FRACTIONS: tuple = (0.2, 0.2, 0.2, 0.2, 0.2)

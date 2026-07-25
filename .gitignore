@@ -4,6 +4,7 @@ __pycache__/
 .env
 logs/
 data/*.json
+data/history_*/
 *.db
 *.db-journal
 *.db-shm
@@ -18,6 +19,8 @@ bot_stdout.log
 trading_bot.out
 bot.log
 *.log
+*.jsonl
 *.pid
+.claude/settings.local.json
 .DS_Store
 

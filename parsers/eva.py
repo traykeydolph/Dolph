@@ -21,8 +21,10 @@ class EvaParser:
 
     # BTO pattern: "BTO TICKER MM/DD/YY STRIKEC/P @ PRICE"
     # Also handles "BTO TICKER MM/DD/YY TICKER STRIKEC/P @ PRICE" (duplicate ticker)
+    # Expiry allows: MM/DD, MM/DD/YY, MM/DD/YYYY, MM/YYYY (monthly), and
+    # 5-digit typo years like 20026 (normalized in _parse_expiry)
     BTO_RE = re.compile(
-        r'BTO\s+([A-Z]{1,5})\s+(\d{1,2}/\d{1,2}/?\d{0,4})\s+'
+        r'BTO\s+([A-Z]{1,5})\s+(\d{1,2}/\d{1,4}/?\d{0,5})\s+'
         r'(?:(?:[A-Z]{1,5})\s+)?'  # optional duplicate ticker
         r'(\d+(?:\.\d+)?)\s*([CP])\s+'
         r'@\s*(\d+(?:\.\d+)?)',
@@ -31,10 +33,26 @@ class EvaParser:
 
     # STC pattern: "STC TICKER MM/DD/YY STRIKEC/P @ PRICE"
     STC_RE = re.compile(
-        r'STC\s+([A-Z]{1,5})\s+(\d{1,2}/\d{1,2}/?\d{0,4})\s+'
+        r'STC\s+([A-Z]{1,5})\s+(\d{1,2}/\d{1,4}/?\d{0,5})\s+'
         r'(?:(?:[A-Z]{1,5})\s+)?'
         r'(\d+(?:\.\d+)?)\s*([CP])\s+'
         r'@\s*(\d+(?:\.\d+)?)',
+        re.IGNORECASE
+    )
+
+    # Share trades: "BTO TICKER @ PRICE" / "STC TICKER @ PRICE" — no expiry,
+    # no strike (e.g. "BTO RIVN @ 16.38 (Adding shares into IRA)")
+    BTO_SHARES_RE = re.compile(
+        r'BTO\s+([A-Z]{1,5})\s+@\s*(\d+(?:\.\d+)?)', re.IGNORECASE
+    )
+    STC_SHARES_RE = re.compile(
+        r'STC\s+([A-Z]{1,5})\s+@\s*(\d+(?:\.\d+)?)', re.IGNORECASE
+    )
+
+    # Option alert missing its strike: "BTO UNH 01/15/27 @ 4.10" — cannot
+    # construct an option symbol, so we skip it loudly (see extract_details)
+    STRIKELESS_OPTION_RE = re.compile(
+        r'(BTO|STC)\s+([A-Z]{1,5})\s+(\d{1,2}/\d{1,4}/?\d{0,5})\s+@\s*(\d+(?:\.\d+)?)',
         re.IGNORECASE
     )
 
@@ -124,20 +142,73 @@ class EvaParser:
                 raw_message=message, message_id=message_id, timestamp=timestamp,
             )
 
+        # Share trades (no expiry/strike): asset_type=STOCK
+        shares_bto = EvaParser.BTO_SHARES_RE.search(message)
+        if shares_bto:
+            return ParsedSignal(
+                analyst="eva",
+                action=SignalAction.ENTRY.value,
+                asset_type=AssetType.STOCK.value,
+                ticker=shares_bto.group(1).upper(), direction="long",
+                strike=None, expiry=None,
+                entry_price=float(shares_bto.group(2)), trim_fraction=None,
+                confidence=0.95,
+                raw_message=message, message_id=message_id, timestamp=timestamp,
+            )
+
+        shares_stc = EvaParser.STC_SHARES_RE.search(message)
+        if shares_stc:
+            msg_lower = message.lower()
+            is_partial = any(term in msg_lower for term in [
+                'half', '1/2', '1/4', '1/3', 'holding', 'some', 'scale out',
+            ])
+            return ParsedSignal(
+                analyst="eva",
+                action=SignalAction.TRIM.value if is_partial else SignalAction.EXIT.value,
+                asset_type=AssetType.STOCK.value,
+                ticker=shares_stc.group(1).upper(), direction="long",
+                strike=None, expiry=None,
+                entry_price=float(shares_stc.group(2)),
+                trim_fraction=0.5 if is_partial else 1.0,
+                confidence=0.95,
+                raw_message=message, message_id=message_id, timestamp=timestamp,
+            )
+
+        # Option alert with expiry but NO strike — unexecutable, skip loudly.
+        # (Explicit skip decision 2026-07-13: can't construct an option symbol
+        # without a strike; Eva presumably posted the strike in an image.)
+        strikeless = EvaParser.STRIKELESS_OPTION_RE.search(message)
+        if strikeless:
+            logger.error(
+                "⚠️ Eva %s %s has expiry %s but NO STRIKE — cannot execute, skipping: %s",
+                strikeless.group(1).upper(), strikeless.group(2).upper(),
+                strikeless.group(3), message_id,
+            )
+            return None
+
         return None  # Fall to Gemini
 
     @staticmethod
     def _parse_expiry(raw: str) -> Optional[str]:
-        """Parse MM/DD or MM/DD/YY into YYYY-MM-DD."""
+        """Parse MM/DD, MM/DD/YY[YY], or MM/YYYY into YYYY-MM-DD.
+
+        Handles Eva's real-world quirks:
+        - MM/YYYY (e.g. "03/2026") = monthly expiration -> third Friday
+        - 5-digit typo years (e.g. "20026" -> 2026)
+        """
         parts = raw.split('/')
         if len(parts) == 2:
-            month, day = parts
+            month, second = parts
+            if len(second) == 4:
+                # MM/YYYY monthly expiry -> third Friday of that month
+                return EvaParser._third_friday(int(second), int(month))
+            day = second
             year = datetime.now().year
         elif len(parts) == 3:
             month, day, year_part = parts
-            year = int(year_part)
-            if year < 100:
-                year += 2000
+            year = EvaParser._normalize_year(year_part)
+            if year is None:
+                return None
         else:
             return None
 
@@ -147,6 +218,29 @@ class EvaParser:
         except ValueError:
             return None
         return expiry
+
+    @staticmethod
+    def _normalize_year(year_part: str) -> Optional[int]:
+        """'27' -> 2027, '2027' -> 2027, typo '20026' -> 2026."""
+        year = int(year_part)
+        if year < 100:
+            year += 2000
+        elif len(year_part) == 5 and year_part.startswith("20"):
+            # Typo like 20026: extra digit after the leading '20'
+            year = int("2" + year_part[-3:])
+        if not (2020 <= year <= 2100):
+            return None
+        return year
+
+    @staticmethod
+    def _third_friday(year: int, month: int) -> Optional[str]:
+        """Third Friday of the month — standard monthly option expiration."""
+        if not (1 <= month <= 12 and 2020 <= year <= 2100):
+            return None
+        first = datetime(year, month, 1)
+        # weekday(): Mon=0 .. Fri=4
+        first_friday_day = 1 + (4 - first.weekday()) % 7
+        return f"{year}-{month:02d}-{first_friday_day + 14:02d}"
 
     @staticmethod
     def enhance_prompt(base_prompt: str, message: str) -> str:
@@ -176,8 +270,15 @@ EVA (EVAPANDA) ANALYST SPECIFIC RULES:
         if not signal:
             return signal
         
-        # Eva trades options exclusively
-        signal.asset_type = AssetType.OPTION
+        # Eva trades mostly options, but also posts share adds/exits
+        # ("BTO RIVN @ 16.38 (Adding shares into IRA)") — only force OPTION
+        # when there's a strike; respect stock classification otherwise
+        if signal.strike:
+            signal.asset_type = AssetType.OPTION
+        elif 'shares' in original_message.lower() or signal.asset_type == AssetType.STOCK:
+            signal.asset_type = AssetType.STOCK
+        else:
+            signal.asset_type = AssetType.OPTION
         
         # Detect if this is an embed-style message and extract BTO/STC
         msg_lower = original_message.lower()

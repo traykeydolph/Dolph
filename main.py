@@ -22,6 +22,7 @@ from alerts.telegram import TelegramAlerter
 from risk.drawdown_manager import DrawdownManager
 from integrations.google_sheets import SheetsSync
 from integrations.obsidian_journal import open_trade, record_trim, close_trade
+from shadow_logger import log_shadow_observation, format_shadow_alert
 
 # ── logging setup ─────────────────────────────────────────────────
 
@@ -297,6 +298,21 @@ class TradingBot:
 
     # ── per-message processing ────────────────────────────────────
 
+    async def _alert_no_action(self, msg: DiscordMessage, verdict: str):
+        """Max-verbosity notification: confirm the bot saw and judged a message
+        even when no trade results. Gated by ALERT_NOISE env (default on)."""
+        if not self.config.alert_noise:
+            return
+        analyst = self.config.channel_to_analyst.get(msg.channel_id, "unknown")
+        preview = (msg.content or "").strip()
+        if not preview and msg.embeds:
+            e = msg.embeds[0]
+            preview = f"{e.get('title', '')} | {e.get('description', '')}".strip(" |")
+        preview = preview[:150] or "(empty message)"
+        await self.alerter.send_message(
+            f"👁 <b>{analyst.replace('_', ' ').title()}</b> — {verdict}\n{preview}"
+        )
+
     async def _process_message(self, msg: DiscordMessage):
         """Process a single Discord message end-to-end."""
 
@@ -320,6 +336,15 @@ class TradingBot:
                     return
             except Exception:
                 pass  # If timestamp parsing fails, process normally
+
+        # 2c. SHADOW / LOG-ONLY channels — observe and return. This branch is
+        # the single gate: it returns before step 6's dispatch, so a shadow
+        # message can never reach _handle_entry/_handle_trim/_handle_exit and
+        # therefore never reaches Alpaca or Coinbase. Asserted in
+        # tests/test_shadow_mode.py.
+        if self.config.is_shadow_channel(msg.channel_id):
+            await self._process_shadow_message(msg)
+            return
 
         # 3. Route & parse via signal router (sync, run in thread, 30s timeout)
         try:
@@ -349,10 +374,12 @@ class TradingBot:
 
         if signal is None:
             logger.debug("No actionable signal in message %s", msg.message_id)
+            await self._alert_no_action(msg, "no action (noise/unparseable)")
             return
 
         if signal.action == SignalAction.INFO:
             logger.debug("Info-only signal in message %s", msg.message_id)
+            await self._alert_no_action(msg, "info only — no trade")
             return
 
         logger.info("Signal: %s %s %s from %s (confidence %.2f)",
@@ -379,6 +406,57 @@ class TradingBot:
             await self._handle_trim(signal)
         elif signal.action in (SignalAction.EXIT, SignalAction.STOP_HIT):
             await self._handle_exit(signal)
+
+    # ── shadow / log-only path ─────────────────────────────────────
+
+    async def _process_shadow_message(self, msg: DiscordMessage):
+        """Observe a shadow-channel message: parse, log to JSONL, alert.
+
+        Deliberately does NOT call _handle_entry/_handle_trim/_handle_exit,
+        create_trade, or open_position. Nothing here can place an order.
+        """
+        analyst = self.config.channel_to_analyst.get(msg.channel_id, "unknown")
+
+        try:
+            signal, tier = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.router.classify_shadow,
+                    msg.channel_id, msg.message_id, msg.content,
+                    msg.timestamp, msg.embeds, msg.referenced_message,
+                ),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Shadow classification timed out (30s) for %s", msg.message_id)
+            signal, tier = None, "timeout"
+        except Exception:
+            logger.exception("Shadow classification failed for %s", msg.message_id)
+            signal, tier = None, "error"
+
+        path = await asyncio.to_thread(
+            log_shadow_observation, analyst, msg.channel_id, msg.message_id,
+            msg.content, msg.timestamp, signal, tier,
+        )
+
+        # Mark processed so the message isn't re-observed next cycle.
+        self.db.log_message(
+            message_id=msg.message_id, channel_id=msg.channel_id,
+            content=msg.content,
+            parsed_as={"shadow": True, "tier": tier, "executed": False,
+                       **({"ticker": signal.ticker} if signal else {})},
+        )
+
+        logger.info("[SHADOW] %s %s → tier=%s signal=%s (logged to %s, NO ORDER)",
+                    analyst, msg.message_id, tier,
+                    f"{signal.action} {signal.ticker}" if signal else "none", path)
+
+        if self.config.alert_noise or signal is not None:
+            try:
+                await self.alerter.send_message(
+                    format_shadow_alert(analyst, msg.content, signal, tier)
+                )
+            except Exception:
+                logger.exception("Shadow Telegram alert failed for %s", msg.message_id)
 
     # ── sheets sync helper ─────────────────────────────────────────
 

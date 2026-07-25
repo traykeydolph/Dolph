@@ -15,6 +15,10 @@ from signal_router import SignalRouter
 from config import Config
 from parsers.base import SignalAction
 
+# Replay tests must exercise EVERY analyst's parser regardless of which
+# analysts are enabled in production (.env ENABLED_ANALYSTS gating)
+os.environ["ENABLED_ANALYSTS"] = ""
+
 # Initialize router once for all tests
 config = Config()
 router = SignalRouter(config)
