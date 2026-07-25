@@ -35,8 +35,12 @@ truth for continuity.*
   executable). Shadow isolation holding.
 - **Landed:** `gh` authenticated; branch `feat/ace-parser-and-waxui-shadow` pushed; **PR #1** open
   into `main` (https://github.com/traykeydolph/Dolph/pull/1). Project skills (start/stop/eod)
-  committed (`d696f54`).
-- **Next:** day 4/5; decide if 07-23 counts; catch the **first Ace lifecycle** whenever Ace posts.
+  committed (`d696f54`). **Blocker 1 fixed** on `fix/missed-exit-on-restart` (PR #2).
+- **⚠️ Paper build = `fix/missed-exit-on-restart`.** This branch is checked out and is the build
+  the next paper session should run — it both advances Gate-1 and live-validates the Blocker 1
+  fix on the code we'll actually ship. (The bot runs whatever branch is checked out.)
+- **Next:** day 4/5 on the fix branch; decide if 07-23 counts; catch the **first Ace lifecycle**
+  whenever Ace posts; then continue LIVE_SAFETY (default-stop backstop, then Blocker 4 → 2 → 3).
 
 ## Config (live)
 - `.env`: `ENABLED_ANALYSTS=eva,ace`, `SHADOW_ANALYSTS=waxui`, `CONTRACTS_ACE=1`
@@ -92,9 +96,11 @@ prose-heavy (46.6% ambiguity) → analyst #3.
 ## 🔴 PRE-LIVE BLOCKERS → see `LIVE_SAFETY.md`
 Four defects that **paper trading hides** and that **must be fixed + verified before real
 money** now live in **`LIVE_SAFETY.md`** (the go-live checklist — none may be waived):
-1. **Missed exit on restart** — cursor is in-memory only; a restart during downtime skips a
-   close permanently, and there is **no broker/option stop backstop**. *Can lose principal —
-   hard stop for going live.*
+1. ~~Missed exit on restart~~ **🟡 FIXED (07-24, branch `fix/missed-exit-on-restart`, PR #2).**
+   Poll cursor now persisted (`poll_cursor` table) + reloaded on startup; stale guard now
+   action-aware (a stale exit/trim/stop for an open position still fires). 9 unit tests + a
+   live Discord restart drill pass. Remaining → 🟢: a market-hours live restart + the
+   default-stop backstop.
 2. **P&L recorded off signal price, not fill** (07-24 GOOGL: fill $0.79, booked $0.70).
 3. **Limit→market escalation after 15s** — bleeds edge on fast fills.
 4. **External calls have no timeout** (07-24) — the Gemini fallback blocks on connect with no
