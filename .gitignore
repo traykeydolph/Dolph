@@ -21,5 +21,6 @@ bot.log
 *.log
 *.jsonl
 *.pid
+.claude/settings.local.json
 .DS_Store
 
