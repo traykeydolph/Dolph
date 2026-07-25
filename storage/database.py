@@ -78,6 +78,12 @@ class Database:
                 parsed_as TEXT,
                 processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS poll_cursor (
+                channel_id TEXT PRIMARY KEY,
+                last_message_id TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         
         # Safe column migrations
@@ -106,6 +112,27 @@ class Database:
             "SELECT 1 FROM message_log WHERE message_id = ?", (message_id,)
         ).fetchone()
         return row is not None
+
+    # ── poll cursor (survives restart — LIVE_SAFETY.md Blocker 1) ──
+
+    def get_cursor(self, channel_id: str) -> str | None:
+        """Last-seen message id for a channel, or None if never polled."""
+        row = self.conn.execute(
+            "SELECT last_message_id FROM poll_cursor WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_cursor(self, channel_id: str, message_id: str):
+        """Persist the poll cursor so a restart resumes from here instead of
+        reseeding to latest (which would skip anything posted while down)."""
+        self.conn.execute(
+            "INSERT INTO poll_cursor (channel_id, last_message_id, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(channel_id) DO UPDATE SET "
+            "last_message_id = excluded.last_message_id, updated_at = CURRENT_TIMESTAMP",
+            (channel_id, message_id),
+        )
+        self.conn.commit()
 
     # ── trades CRUD ──────────────────────────────────────────────
 

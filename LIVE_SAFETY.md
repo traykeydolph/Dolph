@@ -12,7 +12,7 @@
 
 | # | Blocker | Worst case | Status |
 |---|---------|-----------|--------|
-| 1 | Missed exit on restart | **Loss of principal** — position held open, no one watching | 🔴 OPEN |
+| 1 | Missed exit on restart | **Loss of principal** — position held open, no one watching | 🟡 FIX WRITTEN |
 | 2 | P&L recorded off signal, not fill | Corrupted track record (the thing we plan to monetize) | 🔴 OPEN |
 | 3 | Limit→market escalation after 15s | Silent edge-bleed on fast fills | 🔴 OPEN |
 | 4 | External calls have no timeout | A network blip can **hang message processing** indefinitely | 🔴 OPEN |
@@ -52,8 +52,16 @@ message can freeze the bot.
 
 ---
 
-## BLOCKER 1 — Missed exit on restart 🔴
+## BLOCKER 1 — Missed exit on restart 🟡 FIX WRITTEN
 **Can lose principal. Highest priority.**
+
+> **Status (2026-07-24) — fix implemented on branch `fix/missed-exit-on-restart`:**
+> (A) poll cursor is now persisted to the DB (`poll_cursor` table) and reloaded on
+> startup, so a restart resumes with `after=<last seen>` instead of reseeding to latest;
+> (B) the stale-signal guard is now action-aware — a stale **exit/trim/stop** for a
+> currently-open position executes, while stale entries are still skipped. Covered by
+> `tests/test_restart_recovery.py` (9 tests). **Still pending → 🟢:** a live
+> restart-during-outage validation on the real bot, and the default-stop backstop below.
 
 ### Failure mode
 An analyst posts a **close** for an open position while the bot is **down** (crash, machine

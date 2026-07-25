@@ -27,18 +27,26 @@ class DiscordPoller:
     # Re-test disabled channels every 5 minutes
     CIRCUIT_BREAKER_RETRY_INTERVAL = 300
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, cursor_store=None):
         self.config = config
         self.base_url = config.DISCORD_API_BASE
+        # Persistent cursor store (the Database). Any object with
+        # get_cursor(channel_id)->str|None and set_cursor(channel_id, msg_id).
+        # Optional so tests/tools can run the poller without a DB.
+        self._cursor_store = cursor_store
         self.headers = {
             "Authorization": config.discord_user_token,
             "Content-Type": "application/json",
             # Cloudflare blocks python-requests' default UA (error 1010) — must look like a browser
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         }
-        # Track last seen message ID per channel for pagination
+        # Track last seen message ID per channel for pagination. Load any
+        # persisted cursor so a RESTART resumes from the last-seen message
+        # (refetching what was missed) instead of reseeding to latest and
+        # silently skipping everything posted while down — LIVE_SAFETY.md Blocker 1.
         self.last_message_id: dict[str, str | None] = {
-            ch: None for ch in config.discord_only_channels
+            ch: (cursor_store.get_cursor(ch) if cursor_store else None)
+            for ch in config.discord_only_channels
         }
         self._backoff: dict[str, float] = {}
         self._last_success: dict[str, float] = {
@@ -97,6 +105,7 @@ class DiscordPoller:
                 seed_data = seed_resp.json()
                 if seed_data:
                     self.last_message_id[channel_id] = seed_data[0]["id"]
+                    self._persist_cursor(channel_id, seed_data[0]["id"])
                     logger.info("Seeded channel %s cursor to message %s", channel_id, seed_data[0]["id"])
             return []
 
@@ -150,11 +159,22 @@ class DiscordPoller:
                 referenced_message=ref_content,
             ))
 
-        # Update cursor to the newest message
+        # Update cursor to the newest message (and persist so a restart resumes here)
         self.last_message_id[channel_id] = data[-1]["id"]
+        self._persist_cursor(channel_id, data[-1]["id"])
         # Clear backoff on success
         self._backoff.pop(channel_id, None)
         return messages
+
+    def _persist_cursor(self, channel_id: str, message_id: str) -> None:
+        """Best-effort persist of the poll cursor. A failure here must never
+        break the polling loop — the in-memory cursor still advances."""
+        if not self._cursor_store:
+            return
+        try:
+            self._cursor_store.set_cursor(channel_id, message_id)
+        except Exception:
+            logger.exception("Failed to persist poll cursor for channel %s", channel_id)
 
     def get_disabled_channels(self) -> dict[str, float]:
         """Return dict of disabled channel_id → seconds remaining until retry."""

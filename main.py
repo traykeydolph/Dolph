@@ -50,7 +50,9 @@ class TradingBot:
     def __init__(self):
         self.config = Config()
         self.db = Database(self.config.db_path)
-        self.poller = DiscordPoller(self.config)
+        # Persist the poll cursor in the DB so a restart resumes from the last-seen
+        # message instead of reseeding to latest — LIVE_SAFETY.md Blocker 1.
+        self.poller = DiscordPoller(self.config, cursor_store=self.db)
         self.router = SignalRouter(self.config)
         self.position_mgr = PositionManager(self.config, self.db)
         self.spx_converter = SPXConverter()
@@ -321,21 +323,32 @@ class TradingBot:
             logger.debug("Skipping duplicate message %s", msg.message_id)
             return
 
-        # 2b. Stale signal guard — skip messages older than 5 minutes
-        # Prevents executing old signals after bot restart
+        # 2b. Stale signal guard — action & position aware (LIVE_SAFETY.md Blocker 1).
+        # A stale message is normally skipped (don't act on old signals after a
+        # restart), with ONE exception: a close (exit/trim/stop) for a currently
+        # open position must still execute even if late — a recovered close
+        # protects principal. We can't know the action until after parsing, so:
+        #   - No open positions → nothing a late close could protect → skip now,
+        #     without routing (unchanged behaviour, avoids parsing old backlog).
+        #   - A position IS open → let it parse, then decide in step 4b below.
+        is_stale = False
+        age_seconds = 0.0
         if msg.timestamp:
             try:
                 msg_time = datetime.fromisoformat(msg.timestamp.replace('Z', '+00:00'))
                 age_seconds = (datetime.now(timezone.utc) - msg_time).total_seconds()
-                if age_seconds > self.config.stale_signal_seconds:
-                    logger.info("⏭️ Skipping stale message (%.0fs old): %s", age_seconds, msg.message_id)
-                    self.db.log_message(
-                        message_id=msg.message_id, channel_id=msg.channel_id,
-                        content=msg.content, parsed_as={"skipped": "stale_signal", "age_seconds": age_seconds},
-                    )
-                    return
+                is_stale = age_seconds > self.config.stale_signal_seconds
             except Exception:
-                pass  # If timestamp parsing fails, process normally
+                is_stale = False  # unparseable timestamp → process normally
+
+        if is_stale and not self.db.get_open_positions():
+            logger.info("⏭️ Skipping stale message (%.0fs old, no open positions): %s",
+                        age_seconds, msg.message_id)
+            self.db.log_message(
+                message_id=msg.message_id, channel_id=msg.channel_id,
+                content=msg.content, parsed_as={"skipped": "stale_signal", "age_seconds": age_seconds},
+            )
+            return
 
         # 2c. SHADOW / LOG-ONLY channels — observe and return. This branch is
         # the single gate: it returns before step 6's dispatch, so a shadow
@@ -371,6 +384,22 @@ class TradingBot:
             content=msg.content,
             parsed_as=asdict(signal) if signal else None,
         )
+
+        # 4b. Stale gate (post-parse) — a stale message only reached here because
+        # a position is open. Let a close (exit/trim/stop) through to protect it;
+        # drop stale entries/info/noise so we never open an old position.
+        if is_stale:
+            if signal is not None and signal.action in (
+                SignalAction.EXIT, SignalAction.STOP_HIT, SignalAction.TRIM,
+            ):
+                logger.warning("🔁 Recovered STALE %s for %s (%.0fs old) — executing to "
+                               "protect open position: %s",
+                               signal.action, signal.ticker, age_seconds, msg.message_id)
+                # fall through to dispatch
+            else:
+                logger.info("⏭️ Skipping stale %s signal (%.0fs old): %s",
+                            (signal.action if signal else "noise"), age_seconds, msg.message_id)
+                return
 
         if signal is None:
             logger.debug("No actionable signal in message %s", msg.message_id)
