@@ -1,29 +1,42 @@
 # Current Status — Trading Bot
 
-*Single orientation doc. Last updated: 2026-07-22 (EOD). Read this + `CLAUDE.md` +
-`RESTART_PLAN.md` at the start of any session. Keep the "Where we are" and "Open items"
-sections current — this file, not chat history, is the source of truth for continuity.*
+*Single orientation doc. Last updated: 2026-07-24 (EOD). Read this + `CLAUDE.md` +
+`RESTART_PLAN.md` + `LIVE_SAFETY.md` (pre-live blockers) at the start of any session. Keep the
+"Where we are" and "Open items" sections current — this file, not chat history, is the source of
+truth for continuity.*
 
 ---
 
 ## Where we are (TL;DR)
-- **First real paper session ran 2026-07-22** (up 07:10 CT → clean shutdown). Three analysts
-  live: Eva + Ace **execute** on Alpaca paper; Waxui runs **shadow / log-only** (never orders).
-- **Gate 1: Day 1/5 clean · 1/5 lifecycles. Streak ADVANCES (not reset)** — zero parser errors,
-  zero silent failures.
-- **Eva IWM 300C 7/24 — full lifecycle verified.** Entry 08:39 → exit 09:56 CT, P&L **−$17**
-  (a clean mechanical loss). Whole chain clean: regex parse (no Gemini), limit fill, no
-  15s→market escalation, post-exit Alpaca verification, DB row, journal, Sheets. The
-  position-aware **safety guard fired correctly** on 2 phantom-T trims (Eva trimmed a T call the
-  bot never held → parsed fine, execution declined, logged `WARNING`, no order).
-- **Ace: still pending its first live signal.** Silent today (0 messages); Ace posts ~1.8
-  entries/wk so this is expected, not a fault. First Ace lifecycle remains the open milestone.
-- **Waxui shadow: 17 real observations, 0 orders.** Tiers regex 6 / would-hit-Gemini 7 /
-  noise 4; of the 6 parsed, **4 were SPX/index (unexecutable)** — reconfirms shadow-only.
-- Account flat (0 in DB / 0 on Alpaca).
-- **Committed** to branch `feat/ace-parser-and-waxui-shadow`. Push + PR pending a one-time
-  `gh auth login` (gh not yet authenticated on this machine).
-- **Next:** run day 2/5; catch the **first Ace lifecycle** end-to-end whenever Ace next posts.
+- Bot ran **continuously 07-23 → 07-24** (single process, clean SIGTERM stop 07-24 20:15 CT).
+  Three analysts live: Eva + Ace **execute** on Alpaca paper; Waxui **shadow / log-only**.
+- **Gate 1: ~Day 3/5 · 2/5 complete lifecycles · zero parser errors.** Days: 07-22 clean ✓,
+  **07-23 parser-clean but ASTERISKED** (see below), 07-24 clean ✓. No parser error has ever
+  fired, so the clock has **not reset** — but 07-23's reliability gap is Tray's call on whether
+  it counts as a pristine "clean market day."
+- **Complete lifecycles (2):** Eva IWM 300C (07-22, −$17) and Eva GOOGL 325C (07-24, **+$22**).
+  GOOGL: entry $0.48 → single-contract "trim" sold the whole 1-lot and closed it (+$22) → the
+  follow-up exit signal correctly **skipped** (already flat; safety guard). Regex-only, no Gemini.
+- **Open carried position:** Eva **USO 100P exp 2026-12-18** (a LEAP), opened 07-23 @ $2.85,
+  qty 1, still open — not yet a lifecycle.
+- **⚠️ P&L-accuracy finding (07-24 GOOGL trim):** Alpaca **filled at $0.79** but the bot recorded
+  the sell at **$0.70** and computed P&L off that ($22 vs a true ~$31). P&L is being taken from
+  the parsed signal price, not the actual fill — matters for a "verified track record." New open
+  item; NOT touched (Gate-1: no execution-logic changes).
+- **⚠️ 07-23 connectivity outage (~14:16–14:58 CT):** local DNS/network `gaierror` — Discord
+  unreachable, Telegram alerts failed for ~40 min. Bot **survived gracefully** (retries, skipped
+  cycles, no crash); cursor-based polling means gap messages are fetched on recovery, not lost;
+  no trades occurred in the window. Not a parser/silent failure, but a must-fix reliability gap
+  before VPS/live. New open item.
+- **Ace: STILL pending first live signal.** 0 messages 07-21→07-24 (4 quiet days). ~1.8
+  entries/wk avg, so quiet-but-slightly-long; not a fault. First Ace lifecycle = open milestone.
+- **Waxui shadow, 0 orders both days:** 07-23 → 14 obs (regex 4 / would-Gemini 5 / noise 5; all
+  4 parsed executable). 07-24 → 9 obs (regex 4 / would-Gemini 2 / noise 3; all 4 parsed
+  executable). Shadow isolation holding.
+- **Landed:** `gh` authenticated; branch `feat/ace-parser-and-waxui-shadow` pushed; **PR #1** open
+  into `main` (https://github.com/traykeydolph/Dolph/pull/1). Project skills (start/stop/eod)
+  committed (`d696f54`).
+- **Next:** day 4/5; decide if 07-23 counts; catch the **first Ace lifecycle** whenever Ace posts.
 
 ## Config (live)
 - `.env`: `ENABLED_ANALYSTS=eva,ace`, `SHADOW_ANALYSTS=waxui`, `CONTRACTS_ACE=1`
@@ -76,10 +89,26 @@ prose-heavy (46.6% ambiguity) → analyst #3.
 - `config.py` — `shadow_analysts` as a separate axis from `enabled_analysts` (observation wins).
 - tests: `test_ace.py`, `test_ace_corpus.py`, `test_shadow_mode.py` — 367 total pass.
 
+## 🔴 PRE-LIVE BLOCKERS → see `LIVE_SAFETY.md`
+Three defects that **paper trading hides** and that **must be fixed + verified before real
+money** now live in **`LIVE_SAFETY.md`** (the go-live checklist — none may be waived):
+1. **Missed exit on restart** — cursor is in-memory only; a restart during downtime skips a
+   close permanently, and there is **no broker/option stop backstop**. *Can lose principal —
+   hard stop for going live.*
+2. **P&L recorded off signal price, not fill** (07-24 GOOGL: fill $0.79, booked $0.70).
+3. **Limit→market escalation after 15s** — bleeds edge on fast fills.
+Do **not** fix these during Gate-1 (execution logic frozen); `LIVE_SAFETY.md` is the plan for
+the paper→live transition.
+
 ## Open items / decisions (none block paper)
-1. **LIVE-GATE:** `execute_entry_order()` escalates limit → **market** after 15s. On fast/0DTE
-   options this bleeds edge; paper hides it (idealized fills). Before real money, switch to a
-   **capped marketable-limit** (pay up to X% over signal, else skip).
+0b. **Network/DNS resilience (07-23).** ~40-min outage (14:16–14:58 CT): local `gaierror`
+   → Discord unreachable, Telegram sends failed. Bot survived (retries + skipped cycles, no
+   crash); cursor polling refetches gap messages on recovery **so long as it stays up** (if it
+   restarts, see Blocker 1). Fine on a workstation with slow Eva; needs connection hardening +
+   alert-retry/queue before a VPS/live 0DTE path.
+0c. **Single-contract trim == full close (behavior note, not a bug).** With `CONTRACTS=1` a "trim"
+   can only sell the whole 1-lot, so trim and exit collapse: the trim closes the position and the
+   later exit is correctly skipped. Expected; documented so it isn't mistaken for a miss.
 2. **Double teardown on SIGTERM** — CONFIRMED still present (2026-07-22: "Bot stopped." logged
    twice on clean shutdown). Harmless/idempotent now; fix before unattended VPS.
 3. ~~Startup Telegram banner doesn't tag Waxui as `[SHADOW]`.~~ **DONE (2026-07-22):** banner now
