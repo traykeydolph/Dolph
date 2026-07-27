@@ -1,6 +1,6 @@
 # Current Status — Trading Bot
 
-*Single orientation doc. Last updated: 2026-07-24 (EOD). Read this + `CLAUDE.md` +
+*Single orientation doc. Last updated: 2026-07-27 (EOD). Read this + `CLAUDE.md` +
 `RESTART_PLAN.md` + `LIVE_SAFETY.md` (pre-live blockers) at the start of any session. Keep the
 "Where we are" and "Open items" sections current — this file, not chat history, is the source of
 truth for continuity.*
@@ -8,39 +8,41 @@ truth for continuity.*
 ---
 
 ## Where we are (TL;DR)
-- Bot ran **continuously 07-23 → 07-24** (single process, clean SIGTERM stop 07-24 20:15 CT).
-  Three analysts live: Eva + Ace **execute** on Alpaca paper; Waxui **shadow / log-only**.
-- **Gate 1: ~Day 3/5 · 2/5 complete lifecycles · zero parser errors.** Days: 07-22 clean ✓,
-  **07-23 parser-clean but ASTERISKED** (see below), 07-24 clean ✓. No parser error has ever
-  fired, so the clock has **not reset** — but 07-23's reliability gap is Tray's call on whether
-  it counts as a pristine "clean market day."
-- **Complete lifecycles (2):** Eva IWM 300C (07-22, −$17) and Eva GOOGL 325C (07-24, **+$22**).
-  GOOGL: entry $0.48 → single-contract "trim" sold the whole 1-lot and closed it (+$22) → the
-  follow-up exit signal correctly **skipped** (already flat; safety guard). Regex-only, no Gemini.
-- **Open carried position:** Eva **USO 100P exp 2026-12-18** (a LEAP), opened 07-23 @ $2.85,
-  qty 1, still open — not yet a lifecycle.
-- **⚠️ P&L-accuracy finding (07-24 GOOGL trim):** Alpaca **filled at $0.79** but the bot recorded
-  the sell at **$0.70** and computed P&L off that ($22 vs a true ~$31). P&L is being taken from
-  the parsed signal price, not the actual fill — matters for a "verified track record." New open
-  item; NOT touched (Gate-1: no execution-logic changes).
-- **⚠️ 07-23 connectivity outage (~14:16–14:58 CT):** local DNS/network `gaierror` — Discord
-  unreachable, Telegram alerts failed for ~40 min. Bot **survived gracefully** (retries, skipped
-  cycles, no crash); cursor-based polling means gap messages are fetched on recovery, not lost;
-  no trades occurred in the window. Not a parser/silent failure, but a must-fix reliability gap
-  before VPS/live. New open item.
-- **Ace: STILL pending first live signal.** 0 messages 07-21→07-24 (4 quiet days). ~1.8
-  entries/wk avg, so quiet-but-slightly-long; not a fault. First Ace lifecycle = open milestone.
-- **Waxui shadow, 0 orders both days:** 07-23 → 14 obs (regex 4 / would-Gemini 5 / noise 5; all
-  4 parsed executable). 07-24 → 9 obs (regex 4 / would-Gemini 2 / noise 3; all 4 parsed
-  executable). Shadow isolation holding.
-- **Landed:** `gh` authenticated; branch `feat/ace-parser-and-waxui-shadow` pushed; **PR #1** open
-  into `main` (https://github.com/traykeydolph/Dolph/pull/1). Project skills (start/stop/eod)
-  committed (`d696f54`). **Blocker 1 fixed** on `fix/missed-exit-on-restart` (PR #2).
-- **⚠️ Paper build = `fix/missed-exit-on-restart`.** This branch is checked out and is the build
-  the next paper session should run — it both advances Gate-1 and live-validates the Blocker 1
-  fix on the code we'll actually ship. (The bot runs whatever branch is checked out.)
-- **Next:** day 4/5 on the fix branch; decide if 07-23 counts; catch the **first Ace lifecycle**
-  whenever Ace posts; then continue LIVE_SAFETY (default-stop backstop, then Blocker 4 → 2 → 3).
+- 07-27 session on branch `fix/missed-exit-on-restart`. Three analysts live: Eva + Ace
+  **execute** on Alpaca paper; Waxui **shadow / log-only**. Clean SIGTERM stop 07-27 16:42 CT.
+- **Gate 1: 3/5 clean days · 3/5 complete lifecycles · zero parser errors (clock never reset).**
+  Counting clean days: 07-22 ✓, 07-24 ✓, **07-27 ✓\*** — **Tray's call 07-27: today COUNTS as a
+  success, caveated (✓\*)** for the cursor-persistence regression that fired and needed a
+  mid-session code fix (parser + execution ran flawlessly; the one lifecycle verified clean).
+  **07-23** (network outage) remains asterisked and undecided. 4 market days elapsed; 2 of 5
+  clean days still needed.
+- **Complete lifecycles (3):** Eva IWM 300C (07-22, −$17), Eva GOOGL 325C (07-24, **+$22**),
+  **Eva USO 100P (closed 07-27, +$80 recorded).** USO: entry 07-23 @ $2.85 → exit 07-27, full
+  chain verified in log (parse 0.95 → limit sell $3.77 → 15s timeout → market fallback → fill →
+  **post-exit Alpaca verification confirmed closed** → journal → Sheets). Regex-only, no Gemini.
+- **No open carried positions** — account is flat (USO was the last one; closed today).
+- **🟢 Blocker 1 TRULY fixed today (`9dafff2`, pushed).** The "FIXED 07-24" cursor persistence was
+  **silently failing**: `set_cursor` ran on the `to_thread` poll worker but the SQLite conn was
+  opened on the main thread → `ProgrammingError` on *every* cursor write (3 `[ERROR]` lines in the
+  07:13 pre-fix run). Fix = `check_same_thread=False` + a per-instance RLock on all DB methods
+  (serialized mode alone still clashes on shared txn state). Verified live: `poll_cursor` table now
+  populates, **zero persist errors** after the 07:20 restart, 24 healthy poll cycles, lifecycle
+  executed. New regression test reproduces the bug. This is why 07-27 is asterisked — a real
+  regression fired and needed a code fix, though the parser/execution ran flawlessly all day.
+- **⚠️ P&L-accuracy finding RECURRED (Blocker 2).** USO exit: Alpaca market order **filled @ $3.70**
+  but the bot booked the exit @ **$3.65** (the parsed signal price) → P&L $80 vs a true ~$85. Same
+  root cause as 07-24 GOOGL; consistent, known, NOT touched (execution logic frozen in Gate-1).
+- **Ace: STILL pending first live signal.** 0 messages *ever* 07-21→07-27 (6 quiet days); cursor
+  unchanged (`1527352026764148916`). ~1.8 entries/wk avg → quiet but not a fault. First Ace
+  lifecycle = open milestone.
+- **Waxui shadow, 0 orders (isolation holds):** 07-27 → 16 real obs (regex-extract 8 /
+  would-Gemini 4 / noise-skip 4). Parsed split: 7 executable (all SPY) / 1 SPX index
+  (unexecutable). Observed a full SPY cycle (entry→exit→entry→trim×3→exit) + 1 SPX entry.
+- **Landed:** PR #1 (`feat/ace-parser-and-waxui-shadow`) open into `main`. Blocker 1 fix
+  committed + **pushed** to `fix/missed-exit-on-restart` (`9dafff2`, PR #2). Project skills
+  (start/stop/eod) committed.
+- **Next:** day 5/5 (the clean-streak gate); decide if the two asterisked days count; catch the
+  **first Ace lifecycle** whenever Ace posts; then continue LIVE_SAFETY (Blocker 4 → 2 → 3).
 
 ## Config (live)
 - `.env`: `ENABLED_ANALYSTS=eva,ace`, `SHADOW_ANALYSTS=waxui`, `CONTRACTS_ACE=1`
@@ -96,11 +98,15 @@ prose-heavy (46.6% ambiguity) → analyst #3.
 ## 🔴 PRE-LIVE BLOCKERS → see `LIVE_SAFETY.md`
 Four defects that **paper trading hides** and that **must be fixed + verified before real
 money** now live in **`LIVE_SAFETY.md`** (the go-live checklist — none may be waived):
-1. ~~Missed exit on restart~~ **🟡 FIXED (07-24, branch `fix/missed-exit-on-restart`, PR #2).**
-   Poll cursor now persisted (`poll_cursor` table) + reloaded on startup; stale guard now
-   action-aware (a stale exit/trim/stop for an open position still fires). 9 unit tests + a
-   live Discord restart drill pass. Remaining → 🟢: a market-hours live restart + the
-   default-stop backstop.
+1. ~~Missed exit on restart~~ **🟢 FIXED + LIVE-VERIFIED (07-27, `fix/missed-exit-on-restart`,
+   PR #2).** Poll cursor persisted (`poll_cursor` table) + reloaded on startup; stale guard
+   action-aware. The 07-24 fix had a **cross-thread bug that silently defeated persistence**
+   (`set_cursor` on the `to_thread` poll worker vs a main-thread SQLite conn → `ProgrammingError`
+   every write); fixed 07-27 (`9dafff2`: `check_same_thread=False` + per-instance RLock on all DB
+   methods) and **verified live** — `poll_cursor` populates, zero persist errors, healthy poll
+   loop across a full session. Regression test `tests/test_database_threading.py` (reproduces the
+   bug + the concurrent-write hazard). Remaining → optional: a true market-hours restart drill +
+   the default-stop backstop.
 2. **P&L recorded off signal price, not fill** (07-24 GOOGL: fill $0.79, booked $0.70).
 3. **Limit→market escalation after 15s** — bleeds edge on fast fills.
 4. **External calls have no timeout** (07-24) — the Gemini fallback blocks on connect with no
