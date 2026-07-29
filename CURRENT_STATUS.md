@@ -1,6 +1,6 @@
 # Current Status — Trading Bot
 
-*Single orientation doc. Last updated: 2026-07-28 (EOD). Read this + `CLAUDE.md` +
+*Single orientation doc. Last updated: 2026-07-29 (EOD). Read this + `CLAUDE.md` +
 `RESTART_PLAN.md` + `LIVE_SAFETY.md` (pre-live blockers) at the start of any session. Keep the
 "Where we are" and "Open items" sections current — this file, not chat history, is the source of
 truth for continuity.*
@@ -8,27 +8,36 @@ truth for continuity.*
 ---
 
 ## Where we are (TL;DR)
-- 07-28 session on branch `fix/missed-exit-on-restart`. Three analysts live: Eva + Ace
-  **execute** on Alpaca paper; Waxui **shadow / log-only**. Clean SIGTERM stop 07-28 19:09 CT.
-- **Gate 1: 5/5 clean market days ✅ · 4/5 lifecycles · zero parser errors (clock never reset).**
-  Clean days: 07-22 ✓, **07-23 ✓ (Tray's call 07-28 — counts moving forward)**, 07-24 ✓,
-  07-27 ✓\* (caveated), 07-28 ✓ (pristine). **Clean-day criterion is MET;** need 1 more complete
-  lifecycle. BUT the real go-live gate is track-record *integrity*, not the day count — see
-  Blocker 2 (booked P&L is sign-flipping). Do not read "5/5 clean" as "ready."
-- **07-28 was a clean, busy day:** Eva ran **3 ideas** — CSCO (full lifecycle), OKLO + RKLB (both
-  still open). Zero parser errors, zero silent failures. Also **validated Blocker 1 live across a
-  real restart**: the bot **resumed from persisted cursors** (no re-seed), zero persist errors —
-  the market-hours-restart check that was pending is now done. Action-aware stale guard also fired
-  (skipped a 14 h-old message, no open position).
-- **Complete lifecycles (4):** IWM 300C (07-22, real −$17), GOOGL 325C (07-24, real +$31),
-  USO 100P (07-27, real +$85), **CSCO 110P (07-28 — booked +$15 but REAL −$15, a loss).**
+- 07-29 session on branch `fix/missed-exit-on-restart`. Three analysts live: Eva + Ace
+  **execute** on Alpaca paper; Waxui **shadow / log-only**. Clean SIGTERM stop 07-29 17:45 CT.
+- **🎯 30-day clean streak (FIXED code): 1/30 · first CLEAN day banked (07-29).** The
+  `daily_verify` gate returned **CLEAN · streak 1/30** — parser-errors ✅, exec-failures ✅,
+  position-sync (DB 0 / Alpaca 0) ✅, pnl-integrity (booked ≈ real) ✅. This is the real,
+  re-baselined clock (the old "5/5 Gate-1 days" ran on wrong-P&L code and don't count).
+- **07-29 was a clean day, account now flat:** Eva ran **2 ideas** — both carried positions closed.
+  **OKLO 43C** trim→full-close (entry $0.68 → fill **$0.22**, real **−$46**) and **RKLB 70C**
+  trim→full-close (entry $0.72 → fill **$0.33**, real **−$39**). Total real **−$85** (booked −$85,
+  Δ0 — Blocker-2 fix confirmed live). Losses, but correctly parsed, executed, booked. Zero parser
+  errors. Both parsed by **regex, conf 0.95, NO Gemini**.
+- **⚠️ Blocker 3 fired LIVE (07-29 OKLO):** exit limit @ $0.25 didn't fill in 15s → **escalated to
+  market → filled $0.22** (3¢ *through* the limit = ~$3 edge-bleed on 1 contract). Even on paper the
+  escalation path is real. Direct evidence for **#4**. (RKLB filled @ $0.33 in ~1s, no escalation.)
+- **⚠️ New shutdown defect (07-29):** the double-teardown's 2nd pass tried to send the shutdown
+  Telegram alert through an already-closed aiohttp session → `ClientConnectionError: Connector is
+  closed.` **Market-hours alerting was fine** (no send failures during the day); only the shutdown
+  alert was dropped. Elevates the "harmless double-teardown" to *has a visible consequence* — fold
+  a teardown-ordering fix into #4 / VPS phase.
+- **Discord 503 (07-29 12:09, 1 cycle):** poller logged it and **skipped the cycle**; cursor not
+  advanced → next poll refetched. No message loss. Graceful degradation working as designed.
+- **Complete lifecycles (6):** IWM 300C (07-22, real −$17), GOOGL 325C (07-24, real +$31),
+  USO 100P (07-27, real +$85), CSCO 110P (07-28, real −$15), **OKLO 43C (07-29, real −$46),
+  RKLB 70C (07-29, real −$39).** Gate-1's 5-lifecycle count is met on fixed-code days.
 - **⚠️⚠️ Blocker 2 is worse than "optimistic" — it FLIPS SIGNS.** CSCO 07-28: entry filled $1.15,
   exit market-fallback filled **$1.00** (real −$15), but booked at Eva's signal price **$1.30**
   (+$15). A losing trade recorded as a winner. Reconciled against Alpaca: **all-time real +$198 vs
   booked +$233** (Δ −$35). The booked track record is not trustworthy trade-by-trade — this is now
   the top pre-live fix. (Blocker 3's 15s→market escalation caused the bad CSCO fill.)
-- **Open carried positions (2):** Eva **OKLO 43C** (opened 07-28 @ $0.68) and **RKLB 70C**
-  (opened 07-28 @ $0.72), both exp 07-31. Account NOT flat into 07-29.
+- **Open positions: NONE — account flat into 07-30** (both 07-28 carries closed 07-29; DB 0 / Alpaca 0).
 - **🟢 Blocker 1 fixed + live-verified** (`9dafff2`, pushed). `check_same_thread=False` + per-instance
   RLock on all DB methods; `poll_cursor` persists and reloads on restart. Confirmed across the
   07-28 restart (resumed, not re-seeded).
@@ -45,12 +54,11 @@ truth for continuity.*
   a GIF); 2 "Day Trade idea" watchlist posts (CRWV, FIG) — **NOT entries** (Waxui says "will alert
   entry" later), but entry-shaped (ticker + "Love the 07/31 70Cs") → a false-entry risk IF Gemini
   ever fires on them. **Action: set a valid `GEMINI_API_KEY`.**
-- **Ace: STILL pending first live signal.** 0 messages *ever* 07-21→07-28 (7 quiet days); cursor
+- **Ace: STILL pending first live signal.** 0 messages *ever* 07-21→07-29 (8 quiet days); cursor
   unchanged (`1527352026764148916`). ~1.8 entries/wk → quiet, not a fault. First Ace lifecycle = milestone.
-- **Waxui shadow, 0 orders (isolation holds):** 07-28 → 21 real obs (regex 10 / would-Gemini 5 /
-  noise 6). Parsed split: 3 executable (SPY) / **7 SPX index** (unexecutable) — SPX-heavy day,
-  reconfirms shadow-only. Hypothetical P&L (6 ideas to date): first-trim +$111 / laddered +$134 /
-  hold-to-exit +$47 / peak +$501 — SPY needs trim discipline to be profitable.
+- **Waxui shadow, 0 orders (isolation holds):** 07-29 → 13 real obs (regex-extract 5 / would-Gemini 5
+  / noise 3). Parsed split: **5 executable-on-alpaca**, 0 index today. as-if-live laddered all-time
+  **+$345.59** (accruing toward the day-30 all-3 production call).
 - **Landed:** PR #1 (`feat/ace-parser-and-waxui-shadow`) open into `main`. Blocker 1 fix pushed to
   `fix/missed-exit-on-restart` (`9dafff2`, PR #2). Project skills (start/stop/eod) committed.
 - **🎯 Plan (Tray, 07-28): 30-day clean streak on FIXED code.** Re-baselined (the 5 Gate-1 days were
@@ -58,15 +66,29 @@ truth for continuity.*
   health_monitor.py; Tray provisioning the box) → **#3 daily verification gate 🟢 DONE**
   (`daily_verify.py`: refreshes reconcile+shadow_pnl, checks parser-errors/exec-failures/
   position-sync/pnl-integrity, CLEAN/DIRTY verdict + streak N/30 to Telegram, Alpaca-calendar
-  market days only) → **#4 Blockers 3 & 4 (next).** Discipline: NO new analysts / NO Waxui
+  market days only) → **#4 Blockers 3 & 4 🟢 DONE (07-29).** Discipline: NO new analysts / NO Waxui
   execution during the streak; Waxui accrues an as-if-live record via shadow_pnl for the day-30
   all-3 production call. **The verify gate flags 07-28 DIRTY** (CSCO Δ−$30, old-code booking) — so
   the streak correctly starts at 0 and only counts clean, fixed-code days.
+- **🟢 #4 Blockers 3 & 4 fixed (07-29, branch `fix/missed-exit-on-restart`, 427 tests):**
+  **Blocker 3** — naked market escalation replaced with a bounded fill ladder on BOTH entry &
+  exit paths. Entry: ask → capped `ask+max(5%,$0.03)` → SKIP+alert (never markets). Exit: bid →
+  capped `bid−max(5%,$0.03)` → emergency `bid−20%` → true market + loud alert (guaranteed flat —
+  Tray's call: an unfilled exit is worse than crossing the spread). Fill detection now polls every
+  0.5s / ~3s per rung (was a single 15s wait) → worst case ~6s entry / ~9s exit. Escalated fills
+  and skipped entries alert via `main._alert_escalation`. All caps/latency config-driven.
+  **Blocker 4** — Gemini call carries a hard 10s timeout (`gemini_timeout_seconds` → genai
+  `HttpOptions`), so a connect-hang fails fast to noise instead of freezing the loop. **Bonus:**
+  fixed the double-teardown Telegram drop (`stop()` is now idempotent via `self._stopped`) — also
+  kills the double `Bot stopped.` log. Tests: `tests/test_blocker34_fill_ladder.py` (11).
+  **Still pending → 🟢:** observe a real escalation in a paper session; forced-hang check on Gemini.
 - **Gemini key fixed (07-28)** — valid key in .env; health probe passes. Also added
   `tests/conftest.py` stubbing the live Gemini API off in the suite (a valid key made tests hit the
   real API — 14s + a flaky failure; now deterministic/offline again).
-- **Next:** manage OKLO/RKLB exits; stand up the VPS (#2); build the daily verification gate (#3);
-  then Blockers 3 & 4. Catch the **first Ace lifecycle** whenever Ace posts.
+- **Next:** all four blockers are now 🟡/🟢 — remaining pre-live items are the two live-verify
+  checks (observe a real fill escalation in paper; forced-hang check on Gemini) and Blocker 1's
+  live restart-during-outage + default-stop backstop. Stand up the VPS (#2) when the box is ready.
+  Keep banking clean days (**2/30 next**). Catch the **first Ace lifecycle** whenever Ace posts.
 
 ## Config (live)
 - `.env`: `ENABLED_ANALYSTS=eva,ace`, `SHADOW_ANALYSTS=waxui`, `CONTRACTS_ACE=1`

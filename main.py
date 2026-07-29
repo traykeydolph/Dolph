@@ -64,6 +64,7 @@ class TradingBot:
         self._gemini_ok: bool = False       # set by the startup health probe
         self._gemini_detail: str = "unprobed"
         self._running = False
+        self._stopped = False               # guards against double-teardown
         self._last_daily_reset: Optional[str] = None
         self.sheets = SheetsSync()
 
@@ -132,7 +133,13 @@ class TradingBot:
         await self._poll_loop()
 
     async def stop(self):
-        """Graceful shutdown."""
+        """Graceful shutdown. Idempotent: SIGTERM schedules stop() AND the
+        run_until_complete finally block calls it again — without this guard
+        the second pass sent alert_shutdown() through an already-closed aiohttp
+        session ('Connector is closed.') and dropped the shutdown alert."""
+        if self._stopped:
+            return
+        self._stopped = True
         logger.info("Shutting down trading bot...")
         self._running = False
         await self.alerter.alert_shutdown()
@@ -816,6 +823,25 @@ class TradingBot:
             )
             return
 
+        # Blocker 3: entries never escalate to a naked market order — if the
+        # capped limit didn't fill, the client returns status='skipped'/qty 0.
+        # Do NOT open a phantom position; record the skip and alert.
+        if order_result.get("status") == "skipped" or order_result.get("filled_qty", 0) == 0:
+            note = order_result.get("escalation") or "entry not filled within cap"
+            logger.warning("Entry NOT executed for %s — %s", signal.ticker, note)
+            await self.alerter.send_message(
+                f"⚠️ ENTRY SKIPPED — {signal.analyst} {signal.ticker}\n{note}\nNo position opened."
+            )
+            self.db.create_trade(
+                analyst=signal.analyst, message_id=signal.message_id,
+                action=signal.action, asset_type=signal.asset_type,
+                ticker=signal.ticker, direction=signal.direction,
+                strike=signal.strike, expiry=signal.expiry,
+                entry_price=signal.entry_price, confidence=signal.confidence,
+                raw_message=signal.raw_message, status="skipped",
+            )
+            return
+
         filled_qty = order_result.get("filled_qty", order_result.get("quantity", 1))
         filled_price = order_result.get("filled_price", signal.entry_price or 0)
 
@@ -853,6 +879,23 @@ class TradingBot:
         # Send Telegram alert
         await self.alerter.alert_new_entry(signal, order_result, filled_qty, position_size)
         await self._sync_sheets({"signal": signal, "result": order_result, "action": "entry"})
+
+    async def _alert_escalation(self, signal: ParsedSignal, order_result: dict):
+        """Blocker 3: loud alert when an exit/trim only filled via the emergency
+        limit or the market backstop — surfaces fill-quality degradation so a
+        bad fill is never silent (paper hid these entirely before)."""
+        if not order_result:
+            return
+        stage = order_result.get("fill_stage")
+        note = order_result.get("escalation")
+        if note and stage in ("emergency", "market"):
+            emoji = "🚨" if stage == "market" else "⚠️"
+            await self.alerter.send_message(
+                f"{emoji} FILL ESCALATION — {signal.analyst} {signal.ticker}\n"
+                f"{note}\n"
+                f"Filled @ ${order_result.get('filled_price', 0):.2f} "
+                f"(qty {order_result.get('filled_qty', 0)})."
+            )
 
     async def _handle_trim(self, signal: ParsedSignal):
         """Handle a trim signal."""
@@ -958,6 +1001,9 @@ class TradingBot:
                 status="trim_failed",
             )
             return
+
+        # Blocker 3: surface a degraded (emergency/market) fill loudly.
+        await self._alert_escalation(signal, order_result)
 
         # Update position tracking
         trim_result = self.position_mgr.trim_position(signal, trim_price)
@@ -1095,6 +1141,10 @@ class TradingBot:
             logger.warning("Exit order filled_qty=0 for %s %s — treating as failed",
                           signal.analyst, signal.ticker)
             order_result = None  # Trigger force-close retry below
+
+        # Blocker 3: a confirmed primary exit that only filled via the
+        # emergency limit or market backstop → loud alert (no-op otherwise).
+        await self._alert_escalation(signal, order_result)
 
         # If exit order failed, try force-closing at current market price
         if order_result is None and (is_crypto or (self._alpaca and not is_crypto)):

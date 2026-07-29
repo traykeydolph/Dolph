@@ -149,8 +149,10 @@ class AlpacaClient:
         
         # Place order — use limit at ask to avoid wide spread slippage
         side = 'buy' if signal.direction in ['call', 'put', 'long'] else 'sell'
-        limit_price = round(quote['ask'], 2) if quote['ask'] else round(mid_price * 1.02, 2)
+        step = getattr(self.config, "fill_step_timeout", 3)
 
+        # Rung 1 — marketable limit at the ask.
+        limit_price = round(quote['ask'], 2) if quote['ask'] else round(mid_price * 1.02, 2)
         order = self.api.submit_order(
             symbol=option_symbol,
             qty=quantity,
@@ -160,34 +162,57 @@ class AlpacaClient:
             time_in_force='day',
             client_order_id=f"{signal.analyst}_{signal.message_id}"
         )
-
-        logger.info("Submitted option limit order: %s %d %s @ $%.2f",
+        logger.info("Submitted option entry limit (rung 1): %s %d %s @ $%.2f",
                    side, quantity, option_symbol, limit_price)
+        filled_order = self._wait_for_fill(order.id, timeout=step)
+        fill_stage = 'limit'
+        escalation = None
 
-        # Wait for fill — fall back to market if limit doesn't fill
-        filled_order = self._wait_for_fill(order.id, timeout=15)
-        if filled_order is None or filled_order.status not in ('filled', 'partially_filled'):
-            logger.warning("Limit order %s not filled in 15s — replacing with market order", order.id)
-            try:
-                self.api.cancel_order(order.id)
-            except Exception:
-                pass
+        # Rung 2 — capped marketable limit at ask + cap. NEVER a market order:
+        # skipping an entry costs nothing, so a naked market is never justified.
+        if not self._filled_ok(filled_order):
+            self._cancel_quietly(order.id)
+            q2 = self._get_option_quote(option_symbol) or quote
+            ask2 = q2.get('ask') or quote.get('ask') or mid_price
+            cap_price = round(ask2 + self._slippage(ask2), 2)
+            logger.warning("Entry %s unfilled in %.1fs — repricing to capped limit $%.2f (rung 2)",
+                          option_symbol, step, cap_price)
             order = self.api.submit_order(
                 symbol=option_symbol,
                 qty=quantity,
                 side=side,
-                type='market',
+                type='limit',
+                limit_price=cap_price,
                 time_in_force='day',
-                client_order_id=f"{signal.analyst}_{signal.message_id}_mkt"
+                client_order_id=f"{signal.analyst}_{signal.message_id}_c"
             )
-            filled_order = self._wait_for_fill(order.id, timeout=30)
-        
+            filled_order = self._wait_for_fill(order.id, timeout=step)
+            fill_stage = 'capped'
+
+            if not self._filled_ok(filled_order):
+                self._cancel_quietly(order.id)
+                logger.warning("Entry %s NOT filled at capped limit $%.2f — SKIPPING "
+                              "(entries never escalate to market)", option_symbol, cap_price)
+                return {
+                    'order_id': order.id,
+                    'symbol': option_symbol,
+                    'quantity': quantity,
+                    'side': side,
+                    'status': 'skipped',
+                    'fill_stage': 'skipped',
+                    'escalation': f"entry SKIPPED — unfilled at capped limit ${cap_price:.2f}",
+                    'filled_price': 0,
+                    'filled_qty': 0,
+                }
+
         return {
             'order_id': order.id,
             'symbol': option_symbol,
             'quantity': quantity,
             'side': side,
             'status': filled_order.status if filled_order else 'pending',
+            'fill_stage': fill_stage,
+            'escalation': escalation,
             'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else mid_price,
             'filled_qty': int(filled_order.filled_qty) if filled_order else 0
         }
@@ -253,64 +278,68 @@ class AlpacaClient:
             logger.error("Failed to build/resolve option symbol for exit: %s", signal.ticker)
             return None
         
-        # Exit is opposite of entry — use limit at bid to avoid spread slippage
+        # Exit is opposite of entry — sell to close.
         side = 'sell'  # Assuming we're closing long positions
+        step = getattr(self.config, "fill_step_timeout", 3)
+        emerg_pct = getattr(self.config, "emergency_slippage_pct", 0.20)
 
-        # Get quote for limit pricing
         quote = self._get_option_quote(option_symbol)
+        base = f"{signal.analyst}_{signal.message_id}_exit"
+
+        # Build the ladder. Unlike entries, an unfilled exit is a live risk
+        # (an open, unhedged position — the Blocker-1 scenario), so the tail
+        # ends in a true market order to GUARANTEE the position goes flat.
+        # Rungs 1-3 are bounded limits; only the final rung surrenders the price.
         if quote and quote.get('bid') and quote['bid'] > 0:
-            limit_price = round(quote['bid'], 2)
+            bid = quote['bid']
+            rungs = [
+                ('limit', round(bid, 2), 'limit', base),
+                ('limit', max(0.01, round(bid - self._slippage(bid), 2)), 'capped', base + "_c"),
+                ('limit', max(0.01, round(bid - self._slippage(bid, pct=emerg_pct), 2)), 'emergency', base + "_e"),
+                ('market', None, 'market', base + "_mkt"),
+            ]
         else:
-            limit_price = None  # will fall through to market
+            # No bid to anchor a limit — go straight to market (as before).
+            rungs = [('market', None, 'market', base + "_mkt")]
 
-        if limit_price:
-            order = self.api.submit_order(
-                symbol=option_symbol,
-                qty=quantity,
-                side=side,
-                type='limit',
-                limit_price=limit_price,
-                time_in_force='day',
-                client_order_id=f"{signal.analyst}_{signal.message_id}_exit"
-            )
-            logger.info("Submitted option exit limit: %s %d %s @ $%.2f",
-                       side, quantity, option_symbol, limit_price)
+        order = None
+        filled_order = None
+        fill_stage = None
+        escalation = None
 
-            filled_order = self._wait_for_fill(order.id, timeout=15)
-            if filled_order is None or filled_order.status not in ('filled', 'partially_filled'):
-                logger.warning("Exit limit order %s not filled in 15s — replacing with market", order.id)
-                try:
-                    self.api.cancel_order(order.id)
-                except Exception:
-                    pass
-                order = self.api.submit_order(
-                    symbol=option_symbol,
-                    qty=quantity,
-                    side=side,
-                    type='market',
-                    time_in_force='day',
-                    client_order_id=f"{signal.analyst}_{signal.message_id}_exit_mkt"
-                )
-                filled_order = self._wait_for_fill(order.id, timeout=30)
-        else:
-            order = self.api.submit_order(
-                symbol=option_symbol,
-                qty=quantity,
-                side=side,
-                type='market',
-                time_in_force='day',
-                client_order_id=f"{signal.analyst}_{signal.message_id}_exit"
-            )
-            logger.info("Submitted option exit market (no bid available): %s %d %s",
-                       side, quantity, option_symbol)
-            filled_order = self._wait_for_fill(order.id, timeout=30)
-        
+        for otype, price, label, coid in rungs:
+            if order is not None:
+                self._cancel_quietly(order.id)  # clear the previous unfilled rung
+            kwargs = dict(symbol=option_symbol, qty=quantity, side=side,
+                          type=otype, time_in_force='day', client_order_id=coid)
+            if otype == 'limit':
+                kwargs['limit_price'] = price
+                logger.info("Submitted option exit %s: %s %d %s @ $%.2f",
+                           label, side, quantity, option_symbol, price)
+            else:
+                logger.warning("Option exit MARKET BACKSTOP fired for %s — all bounded "
+                              "limits unfilled; taking any price to go flat", option_symbol)
+            order = self.api.submit_order(**kwargs)
+            # Market rung gets a longer window; it should fill near-instantly.
+            filled_order = self._wait_for_fill(order.id, timeout=(10 if otype == 'market' else step))
+            fill_stage = label
+            if self._filled_ok(filled_order):
+                break
+            if otype == 'limit':
+                logger.warning("Exit rung '%s' ($%.2f) unfilled in %.1fs — escalating",
+                              label, price, step)
+
+        if fill_stage in ('emergency', 'market'):
+            escalation = f"exit filled via {fill_stage} escalation (bounded limits unfilled)"
+
         return {
             'order_id': order.id,
             'symbol': option_symbol,
             'quantity': quantity,
             'side': side,
             'status': filled_order.status if filled_order else 'pending',
+            'fill_stage': fill_stage,
+            'escalation': escalation,
             'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else 0,
             'filled_qty': int(filled_order.filled_qty) if filled_order else 0
         }
@@ -671,31 +700,58 @@ class AlpacaClient:
             logger.exception("Failed to get stock quote for %s", symbol)
             return None
     
-    def _wait_for_fill(self, order_id: str, timeout: int = 30) -> Optional[Any]:
-        """Wait for order to fill with timeout."""
-        
+    def _wait_for_fill(self, order_id: str, timeout: float = 30,
+                       poll_interval: Optional[float] = None) -> Optional[Any]:
+        """Wait for order to fill with timeout, polling every ``poll_interval`` s
+        (default from config — 0.5s, so a marketable limit's fill is detected
+        fast and we don't sit through dead time before escalating)."""
+
+        if poll_interval is None:
+            poll_interval = getattr(self.config, "fill_poll_interval", 0.5)
         start_time = time.time()
-        
+
         while time.time() - start_time < timeout:
             try:
                 order = self.api.get_order(order_id)
-                
+
                 if order.status in ['filled', 'partially_filled']:
-                    logger.info("Order %s filled: %s shares @ $%s", 
+                    logger.info("Order %s filled: %s shares @ $%s",
                                order_id, order.filled_qty, order.filled_avg_price)
                     return order
                 elif order.status in ['cancelled', 'rejected']:
                     logger.error("Order %s failed: %s", order_id, order.status)
                     return order
-                
-                time.sleep(1)  # Wait 1 second before checking again
-                
+
+                time.sleep(poll_interval)
+
             except Exception:
                 logger.exception("Error checking order status for %s", order_id)
                 break
-        
-        logger.warning("Order %s timeout after %d seconds", order_id, timeout)
+
+        logger.warning("Order %s timeout after %.1f seconds", order_id, timeout)
         return None
+
+    # ------------------------------------------------------------------
+    # Blocker 3 helpers — bounded fill ladder (no naked market orders)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _filled_ok(order: Optional[Any]) -> bool:
+        return order is not None and getattr(order, "status", None) in ("filled", "partially_filled")
+
+    def _slippage(self, price: float, pct: Optional[float] = None) -> float:
+        """How far past the quote we'll pay: max(pct·price, abs floor). The abs
+        floor lets a cheap option cross a spread that a bare % would round away."""
+        if pct is None:
+            pct = getattr(self.config, "slippage_cap_pct", 0.05)
+        abs_floor = getattr(self.config, "slippage_cap_abs", 0.03)
+        return max(round(price * pct, 2), abs_floor)
+
+    def _cancel_quietly(self, order_id: str) -> None:
+        try:
+            self.api.cancel_order(order_id)
+        except Exception:
+            pass
     
     def get_account_info(self) -> Optional[Dict[str, Any]]:
         """Get account information and buying power."""

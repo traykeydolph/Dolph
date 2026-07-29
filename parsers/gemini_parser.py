@@ -48,11 +48,28 @@ class GeminiParser:
             logger.warning("Gemini SDK not installed — Tier 3 parsing disabled")
             return
 
+        # Blocker 4: a network blip that resolves DNS but can't complete the
+        # connection would otherwise hang the blocking genai call indefinitely
+        # (froze the test suite >2min once). A hard timeout converts that hang
+        # into a fast failure that parse()'s except already handles.
+        self._timeout_s = float(getattr(config, "gemini_timeout_seconds", 10) or 10)
+
         try:
             if _genai_version == "new":
-                self._client = _genai.Client(api_key=config.gemini_api_key)
+                http_options = None
+                try:
+                    # HttpOptions.timeout is in MILLISECONDS.
+                    http_options = _genai.types.HttpOptions(
+                        timeout=int(self._timeout_s * 1000)
+                    )
+                except Exception:
+                    logger.warning("google.genai HttpOptions unavailable — client timeout not set")
+                self._client = _genai.Client(
+                    api_key=config.gemini_api_key,
+                    http_options=http_options,
+                ) if http_options else _genai.Client(api_key=config.gemini_api_key)
                 self._available = True
-                logger.info("Gemini parser ready (google.genai SDK)")
+                logger.info("Gemini parser ready (google.genai SDK, timeout=%.0fs)", self._timeout_s)
             else:
                 _genai.configure(api_key=config.gemini_api_key)
                 self.model = _genai.GenerativeModel('gemini-2.5-flash')
@@ -71,7 +88,7 @@ class GeminiParser:
             if _genai_version == "new":
                 self._client.models.generate_content(model="gemini-2.5-flash", contents="ping")
             else:
-                self.model.generate_content("ping")
+                self.model.generate_content("ping", request_options={"timeout": self._timeout_s})
             return True, "ok"
         except Exception as e:  # noqa: BLE001 — surface the reason
             return False, str(e).splitlines()[0][:180]
@@ -97,7 +114,9 @@ class GeminiParser:
                 )
                 response_text = response.text
             else:
-                response = self.model.generate_content(prompt)
+                response = self.model.generate_content(
+                    prompt, request_options={"timeout": self._timeout_s}
+                )
                 response_text = response.text
 
             # Parse structured response

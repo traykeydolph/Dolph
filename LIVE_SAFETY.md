@@ -13,13 +13,26 @@
 | # | Blocker | Worst case | Status |
 |---|---------|-----------|--------|
 | 1 | Missed exit on restart | **Loss of principal** — position held open, no one watching | 🟡 FIX WRITTEN |
-| 2 | P&L recorded off signal, not fill | Corrupted track record (the thing we plan to monetize) | 🔴 OPEN |
-| 3 | Limit→market escalation after 15s | Silent edge-bleed on fast fills | 🔴 OPEN |
-| 4 | External calls have no timeout | A network blip can **hang message processing** indefinitely | 🔴 OPEN |
+| 2 | P&L recorded off signal, not fill | Corrupted track record (the thing we plan to monetize) | 🟢 VERIFIED |
+| 3 | Limit→market escalation after 15s | Silent edge-bleed on fast fills | 🟡 FIX WRITTEN |
+| 4 | External calls have no timeout | A network blip can **hang message processing** indefinitely | 🟡 FIX WRITTEN |
 
 ---
 
-## BLOCKER 4 — External calls have no connection timeout 🔴
+## BLOCKER 4 — External calls have no connection timeout 🟡 FIX WRITTEN
+
+> **Status (2026-07-29, branch `fix/missed-exit-on-restart`):** the Gemini client
+> now carries a hard timeout. `config.gemini_timeout_seconds` (default 10s) is passed
+> as `google.genai` `HttpOptions(timeout=…ms)` at client construction (covers `parse`
+> **and** `health_check`); the legacy SDK gets the same via per-call `request_options`.
+> A connect-hang now raises promptly → `parse`'s existing `except` returns `None`
+> (noise), so it can no longer freeze message processing. The suite is hermetic
+> (`tests/conftest.py` stubs the live LLM; `tests/test_blocker34_fill_ladder.py`
+> pins the timeout wiring). **Still pending → 🟢:** confirm under a *forced* connect
+> hang that `route_message` returns within the timeout, and that the 60s message
+> watchdog wraps the call end-to-end.
+
+### (original analysis)
 
 ### Failure mode
 The Gemini LLM fallback makes a **blocking network call with no connection timeout**. When the
@@ -111,7 +124,12 @@ everything posted before boot. It only advances the cursor on a *successful* fet
 
 ---
 
-## BLOCKER 2 — P&L recorded off signal price, not actual fill 🔴
+## BLOCKER 2 — P&L recorded off signal price, not actual fill 🟢 VERIFIED
+
+> **Status (2026-07-29):** fixed 07-28 (the `try/except/else` clobber removed) and now
+> **verified live** — 07-29 OKLO & RKLB both booked off the real Alpaca fill (reconcile Δ0
+> each). See `tests/test_blocker2_fill_price.py` and the daily reconcile.
+
 
 ### Failure mode
 Recorded P&L reflects the **parsed signal price**, not the **Alpaca fill** — so the track record
@@ -137,7 +155,26 @@ that order id (reconcile against the broker, not the message).
 
 ---
 
-## BLOCKER 3 — Limit→market escalation after 15s 🔴
+## BLOCKER 3 — Limit→market escalation after 15s 🟡 FIX WRITTEN
+
+> **Status (2026-07-29, branch `fix/missed-exit-on-restart`):** naked market escalation
+> replaced with a **bounded fill ladder** (both entry *and* exit paths — the live OKLO
+> 07-29 case fired on an exit, not just entries). Fills are now detected every **0.5s**
+> and each rung waits **~3s** (was a single 15s wait), so worst-case resolution drops
+> from ~15s (+30s market leg) to ~6s (entry) / ~9s (exit).
+>   - **Entry:** limit@ask → capped limit@`ask+max(5%,$0.03)` → **SKIP + alert**. No
+>     market order is reachable for an entry (a skipped entry costs nothing).
+>   - **Exit:** limit@bid → capped@`bid−max(5%,$0.03)` → emergency@`bid−20%` → **true
+>     market + loud alert**. The tail keeps a guaranteed-fill market order *by design*
+>     (Tray's call 07-29): an unfilled exit is the Blocker-1 open-position risk, so
+>     going flat beats price-protection in the catastrophic tail. Rungs 1-3 bound the
+>     price in every non-catastrophic case.
+> Caps/latency are config-driven (`slippage_cap_pct`/`_abs`, `emergency_slippage_pct`,
+> `fill_step_timeout`, `fill_poll_interval`). Escalated fills (emergency/market) and
+> skipped entries alert via `main._alert_escalation`. Covered by
+> `tests/test_blocker34_fill_ladder.py` (entry never markets; exit rungs bounded &
+> descending; market backstop guarantees flat). **Still pending → 🟢:** observe a real
+> escalation in a paper session and confirm the alert + booked fill match.
 
 ### Failure mode
 `execute_entry_order()` replaces an unfilled limit with a **market** order after 15s
