@@ -884,9 +884,17 @@ class TradingBot:
             trim_qty = max(1, int(position.current_quantity * trim_fraction))
             trim_qty = min(trim_qty, position.current_quantity)
 
-        # Execute exit for the trimmed portion
+        # Execute exit for the trimmed portion.
+        # trim_price is the ACTUAL fill (order_result['filled_price']) set inside
+        # the branch below. It defaults to the signal price only as a last resort
+        # when no order path runs (order_result stays None → early-returned below).
+        # NOTE (Blocker 2 fix): there used to be a `try/except/else` here whose
+        # `else` ran on SUCCESS and overwrote trim_price with signal.entry_price —
+        # booking every trim at the analyst's signal price, not the real fill
+        # (e.g. CSCO booked +$15 vs a real −$15). The else is gone.
         is_crypto = signal.asset_type in (AssetType.CRYPTO, AssetType.CRYPTO.value, 'crypto')
         order_result = None
+        trim_price = signal.entry_price or 0
         try:
             if is_crypto and self._coinbase:
                 order_result = await asyncio.wait_for(
@@ -906,8 +914,6 @@ class TradingBot:
                 f"🚨 TRIM TIMEOUT — {signal.ticker}\nOrder timed out. Check broker for orphaned orders."
             )
             order_result = None
-        else:
-            trim_price = signal.entry_price or 0
 
         # If order failed, don't update position — we still hold the contracts
         if order_result is None:
@@ -1043,9 +1049,14 @@ class TradingBot:
         if position.asset_type and not signal.asset_type:
             signal.asset_type = position.asset_type
 
-        # Execute full exit
+        # Execute full exit. exit_price is the ACTUAL fill set in the branch
+        # below (or by the force-close retry on timeout). Defaults to the signal
+        # price only if no order path runs. NOTE (Blocker 2 fix): the old
+        # `try/except/else` `else` ran on SUCCESS and overwrote exit_price with
+        # signal.entry_price, booking exits at the signal price not the fill.
         order_result = None
         is_crypto = signal.asset_type in (AssetType.CRYPTO, AssetType.CRYPTO.value, 'crypto')
+        exit_price = signal.entry_price or 0
         try:
             if is_crypto and self._coinbase:
                 order_result = await asyncio.wait_for(
@@ -1065,8 +1076,6 @@ class TradingBot:
                 f"🚨 EXIT TIMEOUT — {signal.ticker}\nOrder timed out. Attempting force close..."
             )
             order_result = None  # Falls through to force-close retry below
-        else:
-            exit_price = signal.entry_price or 0
 
         # ── FIX: Check if order actually filled (not just submitted) ──
         if order_result and order_result.get("status") in ("pending", "cancelled", "rejected", "expired"):

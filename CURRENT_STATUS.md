@@ -53,9 +53,18 @@ truth for continuity.*
   hold-to-exit +$47 / peak +$501 — SPY needs trim discipline to be profitable.
 - **Landed:** PR #1 (`feat/ace-parser-and-waxui-shadow`) open into `main`. Blocker 1 fix pushed to
   `fix/missed-exit-on-restart` (`9dafff2`, PR #2). Project skills (start/stop/eod) committed.
-- **Next:** manage OKLO/RKLB exits; day 5/5 clean-streak gate; decide if 07-23 counts; **prioritize
-  Blocker 2** (P&L off fill, now sign-flipping); catch the **first Ace lifecycle**. Commit the
-  dashboard tooling when ready.
+- **🎯 New plan (Tray, 07-28): drive toward a 30-day clean streak on FIXED code.** Fixing execution
+  logic re-baselines the streak (the 5 Gate-1 days were on old, wrong-P&L code — that's fine, we
+  WANT the 30-day count to run on final code). Sequence: **#1 Blocker 2 (🟢 DONE)** → **#2 VPS +
+  health alerting + auto-restart** (Tray provisioning) → **#3 automated daily verification gate**
+  (folds in reconcile_fills + shadow_pnl so Waxui accrues an "as-if-live" record) → **#4 Blockers
+  3 & 4.** Discipline: NO new analysts / NO Waxui execution during the streak. Waxui tracked
+  hypothetically (shadow_pnl) so all 3 can be judged for production at day 30.
+- **Gemini key fixed (07-28)** — valid key in .env; health probe passes. Also added
+  `tests/conftest.py` stubbing the live Gemini API off in the suite (a valid key made tests hit the
+  real API — 14s + a flaky failure; now deterministic/offline again).
+- **Next:** manage OKLO/RKLB exits; stand up the VPS (#2); build the daily verification gate (#3);
+  then Blockers 3 & 4. Catch the **first Ace lifecycle** whenever Ace posts.
 
 ## Config (live)
 - `.env`: `ENABLED_ANALYSTS=eva,ace`, `SHADOW_ANALYSTS=waxui`, `CONTRACTS_ACE=1`
@@ -120,9 +129,13 @@ money** now live in **`LIVE_SAFETY.md`** (the go-live checklist — none may be 
    loop across a full session. Regression test `tests/test_database_threading.py` (reproduces the
    bug + the concurrent-write hazard). Remaining → optional: a true market-hours restart drill +
    the default-stop backstop.
-2. **P&L recorded off signal price, not fill — TOP PRIORITY.** Now proven to **flip trade signs**
-   (07-28 CSCO: real −$15 booked as +$15). All-time real +$198 vs booked +$233. `reconcile_fills.py`
-   quantifies it against Alpaca fills, but the DB record itself is wrong — fix before any go-live.
+2. ~~P&L recorded off signal price, not fill~~ **🟢 FIXED (07-28).** Root cause: a `try/except/else`
+   in _handle_trim/_handle_exit whose `else` ran on SUCCESS and overwrote the real
+   `order_result['filled_price']` with `signal.entry_price` — booking every exit at the analyst's
+   signal price (07-28 CSCO: real −$15 booked as +$15, a sign flip). The `else` is gone; exits/trims
+   now book the actual fill. Regression test `tests/test_blocker2_fill_price.py` (5 tests, proven
+   load-bearing). **Forward-looking:** trades made BEFORE the fix stay mis-booked in the DB (that's
+   why `reconcile_fills.py` still shows historical deltas); new trades will reconcile to ~zero Δ.
 3. **Limit→market escalation after 15s** — bleeds edge on fast fills.
 4. **External calls have no timeout** (07-24) — the Gemini fallback blocks on connect with no
    timeout; a network blip can hang message processing. Surfaced as a >2min test-suite hang
