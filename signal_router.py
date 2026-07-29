@@ -235,16 +235,34 @@ class SignalRouter:
     def classify_shadow(self, channel_id: str, message_id: str, content: str,
                         timestamp: str, embeds: list = None,
                         referenced_message: str = None) -> tuple[Optional[ParsedSignal], str]:
-        """Parse for observation only. Returns (signal_or_None, tier).
+        """Regex-tier-only observation parse. Returns (signal_or_None, tier).
+        Never calls Gemini. Thin wrapper over shadow_audit for callers that only
+        want the deterministic verdict (and its tests)."""
+        r = self.shadow_audit(channel_id, message_id, content, timestamp,
+                              embeds, referenced_message, run_gemini=False)
+        return r["regex_signal"], r["tier"]
 
-        Gemini is deliberately NOT called — a message that would reach Tier 3
-        is recorded as 'would-hit-Gemini' so the shadow log measures how much
-        LLM fallback a live run would need, without spending on it.
+    def shadow_audit(self, channel_id: str, message_id: str, content: str,
+                     timestamp: str, embeds: list = None,
+                     referenced_message: str = None, run_gemini: bool = False) -> dict:
+        """Full observation parse for the audit trail. Runs the regex tier
+        always; when `run_gemini` and regex MISSES, also runs the Gemini tier —
+        exactly matching production, where Gemini is consulted only on a regex
+        miss. Executes nothing. Returns both verdicts:
+
+            {regex_signal, tier, gemini_signal, gemini_ran, gemini_error}
+
+        This is the dataset for trusting Waxui execution: for every message we
+        capture what the deterministic parser said AND what the LLM fallback
+        would have said, so misparses (e.g. a watchlist idea read as a BUY) are
+        caught in the log before they could ever fire live.
         """
         analyst = self.config.channel_to_analyst.get(channel_id, "unknown")
+        result = {"regex_signal": None, "tier": self.TIER_NOISE,
+                  "gemini_signal": None, "gemini_ran": False, "gemini_error": None}
 
         if not content.strip() and not embeds:
-            return None, self.TIER_NOISE
+            return result
 
         if embeds:
             structured = self._extract_embed_content(embeds)
@@ -265,11 +283,11 @@ class SignalRouter:
         }
         is_noise = noise_checks.get(analyst)
         if is_noise and is_noise(parse_content):
-            return None, self.TIER_NOISE
+            return result  # tier = noise-skip
 
         library_match = obsidian_match(parse_content, analyst)
         if library_match and library_match.signal_type == "NOISE":
-            return None, self.TIER_NOISE
+            return result  # tier = noise-skip
 
         signal = self._run_regex_extractor(analyst, parse_content, message_id, timestamp)
         if signal:
@@ -280,14 +298,20 @@ class SignalRouter:
                     "EXIT": SignalAction.EXIT.value,
                 }
                 signal.action = action_map.get(library_match.signal_type, signal.action)
-            return signal, self.TIER_REGEX
+            result["regex_signal"] = signal
+            result["tier"] = self.TIER_REGEX
+            return result
 
-        if library_match:
-            # Library says it's actionable but regex couldn't pull the details —
-            # a live run would spend a Gemini call here.
-            return None, self.TIER_GEMINI
-
-        return None, self.TIER_UNPARSED
+        # Regex missed → production would fall through to Gemini here.
+        result["tier"] = self.TIER_GEMINI if library_match else self.TIER_UNPARSED
+        if run_gemini:
+            result["gemini_ran"] = True
+            try:
+                result["gemini_signal"] = self.gemini_parser.parse(
+                    parse_content, channel_id, message_id, timestamp)
+            except Exception as exc:  # noqa: BLE001 — parse usually swallows, belt-and-braces
+                result["gemini_error"] = str(exc)[:200]
+        return result
 
     # Analysts with a free deterministic regex parser, tried before Gemini.
     REGEX_EXTRACTORS = {

@@ -61,6 +61,21 @@ class GeminiParser:
         except Exception:
             logger.exception("Gemini initialization failed — Tier 3 parsing disabled")
 
+    def health_check(self) -> tuple[bool, str]:
+        """Actually probe the API. `_available` only means the client object
+        constructed — an INVALID key fails only on the first real call, so a
+        live probe is the only way to know the fallback works."""
+        if not self._available:
+            return False, "unavailable (no key or SDK)"
+        try:
+            if _genai_version == "new":
+                self._client.models.generate_content(model="gemini-2.5-flash", contents="ping")
+            else:
+                self.model.generate_content("ping")
+            return True, "ok"
+        except Exception as e:  # noqa: BLE001 — surface the reason
+            return False, str(e).splitlines()[0][:180]
+
     def parse(self, message: str, channel_id: str, message_id: str,
               timestamp: str, hint_action: str = None) -> Optional[ParsedSignal]:
         """Parse Discord message using Gemini Flash."""

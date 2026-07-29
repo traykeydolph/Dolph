@@ -22,7 +22,8 @@ from alerts.telegram import TelegramAlerter
 from risk.drawdown_manager import DrawdownManager
 from integrations.google_sheets import SheetsSync
 from integrations.obsidian_journal import open_trade, record_trim, close_trade
-from shadow_logger import log_shadow_observation, format_shadow_alert
+from shadow_logger import (log_shadow_observation, format_shadow_alert, INDEX_TICKERS,
+                           would_execute as shadow_would_execute)
 
 # ── logging setup ─────────────────────────────────────────────────
 
@@ -60,6 +61,8 @@ class TradingBot:
         self.drawdown_mgr = DrawdownManager(self.config, self.db)
         self._alpaca: Optional[AlpacaClient] = None
         self._coinbase: Optional[CoinbaseClient] = None
+        self._gemini_ok: bool = False       # set by the startup health probe
+        self._gemini_detail: str = "unprobed"
         self._running = False
         self._last_daily_reset: Optional[str] = None
         self.sheets = SheetsSync()
@@ -213,6 +216,20 @@ class TradingBot:
                 logger.info("✅ Obsidian Signal Library accessible (no match for test)")
         except Exception as e:
             warnings.append(f"Obsidian Signal Library error: {e}")
+
+        # 5b. Gemini fallback health — a live probe (the client can construct with
+        # an invalid key; it only fails on the first real call). Not fatal: Eva/Ace
+        # are regex-parsed, so Gemini is a fallback net + the Waxui shadow-audit tier.
+        try:
+            self._gemini_ok, self._gemini_detail = await asyncio.wait_for(
+                asyncio.to_thread(self.router.gemini_parser.health_check), timeout=20)
+        except Exception as e:
+            self._gemini_ok, self._gemini_detail = False, str(e)[:120]
+        if self._gemini_ok:
+            logger.info("✅ Gemini fallback reachable")
+        else:
+            warnings.append(f"Gemini fallback DOWN ({self._gemini_detail}) — regex-only; "
+                            f"a regex miss would drop silently, and shadow-audit can't score Gemini")
 
         # 6. Position mismatch check (DB vs broker)
         if self._alpaca:
@@ -415,16 +432,22 @@ class TradingBot:
                      signal.action, signal.ticker, signal.direction or "",
                      signal.analyst, signal.confidence)
 
-        # 5. SPX signals — SKIP until Tastytrade is connected (no conversion hack)
-        if signal.ticker and signal.ticker.upper() == "SPX":
-            logger.info("⏭️ Skipping SPX signal from %s — SPX disabled until Tastytrade connected", signal.analyst)
+        # 5. Cash-settled INDEX options (SPX/SPXW/XSP/NDX/RUT/VIX/…) — SKIP: not
+        #    executable on Alpaca until a second broker (Tastytrade) is connected.
+        #    Broadened from SPX-only so a Waxui XSP/NDX/RUT signal can never attempt
+        #    a doomed order once Waxui goes executable. Eva/Ace never emit these,
+        #    so this does not change their behaviour.
+        if signal.ticker and signal.ticker.upper() in INDEX_TICKERS:
+            logger.info("⏭️ Skipping %s index signal from %s — cash-settled index, "
+                        "not executable on Alpaca (needs Tastytrade)",
+                        signal.ticker.upper(), signal.analyst)
             self.db.create_trade(
                 analyst=signal.analyst, message_id=signal.message_id,
                 action=signal.action, asset_type=signal.asset_type,
                 ticker=signal.ticker, direction=signal.direction,
                 strike=signal.strike, expiry=signal.expiry,
                 entry_price=signal.entry_price, confidence=signal.confidence,
-                raw_message=signal.raw_message, status="skipped_spx",
+                raw_message=signal.raw_message, status="skipped_index",
             )
             return
 
@@ -447,43 +470,65 @@ class TradingBot:
         analyst = self.config.channel_to_analyst.get(msg.channel_id, "unknown")
 
         try:
-            signal, tier = await asyncio.wait_for(
+            audit = await asyncio.wait_for(
                 asyncio.to_thread(
-                    self.router.classify_shadow,
+                    self.router.shadow_audit,
                     msg.channel_id, msg.message_id, msg.content,
                     msg.timestamp, msg.embeds, msg.referenced_message,
+                    self._gemini_ok,        # run the Gemini tier only if it's reachable
                 ),
-                timeout=30,
+                timeout=45,
             )
         except asyncio.TimeoutError:
-            logger.error("Shadow classification timed out (30s) for %s", msg.message_id)
-            signal, tier = None, "timeout"
+            logger.error("Shadow classification timed out (45s) for %s", msg.message_id)
+            audit = {"regex_signal": None, "tier": "timeout", "gemini_signal": None,
+                     "gemini_ran": False, "gemini_error": "timeout"}
         except Exception:
             logger.exception("Shadow classification failed for %s", msg.message_id)
-            signal, tier = None, "error"
+            audit = {"regex_signal": None, "tier": "error", "gemini_signal": None,
+                     "gemini_ran": False, "gemini_error": "exception"}
+
+        signal = audit["regex_signal"]
+        tier = audit["tier"]
+        gemini_signal = audit.get("gemini_signal")
 
         path = await asyncio.to_thread(
             log_shadow_observation, analyst, msg.channel_id, msg.message_id,
             msg.content, msg.timestamp, signal, tier,
+            gemini_signal, audit.get("gemini_ran", False),
+            audit.get("gemini_error"), self._gemini_ok,
         )
+
+        # would_execute: what production WOULD have done (regex wins; Gemini on miss).
+        effective = signal if signal is not None else gemini_signal
+        fires = shadow_would_execute(effective)
 
         # Mark processed so the message isn't re-observed next cycle.
         self.db.log_message(
             message_id=msg.message_id, channel_id=msg.channel_id,
             content=msg.content,
             parsed_as={"shadow": True, "tier": tier, "executed": False,
+                       "would_execute": fires,
                        **({"ticker": signal.ticker} if signal else {})},
         )
 
-        logger.info("[SHADOW] %s %s → tier=%s signal=%s (logged to %s, NO ORDER)",
+        gverdict = (f" gemini={gemini_signal.action}/{gemini_signal.ticker}"
+                    if gemini_signal else (" gemini=none" if audit.get("gemini_ran") else ""))
+        logger.info("[SHADOW] %s %s → tier=%s regex=%s%s would_execute=%s (logged, NO ORDER)",
                     analyst, msg.message_id, tier,
-                    f"{signal.action} {signal.ticker}" if signal else "none", path)
+                    f"{signal.action} {signal.ticker}" if signal else "none",
+                    gverdict, fires)
 
-        if self.config.alert_noise or signal is not None:
+        if self.config.alert_noise or signal is not None or fires:
             try:
-                await self.alerter.send_message(
-                    format_shadow_alert(analyst, msg.content, signal, tier)
-                )
+                body = format_shadow_alert(analyst, msg.content, signal, tier)
+                if fires:
+                    body = ("⚠️ <b>WOULD EXECUTE if live</b> "
+                            f"({(effective.action)} {effective.ticker})\n" + body)
+                if gemini_signal is not None:
+                    body += (f"\nGemini: {gemini_signal.action} {gemini_signal.ticker} "
+                             f"@ conf {gemini_signal.confidence:.2f}")
+                await self.alerter.send_message(body)
             except Exception:
                 logger.exception("Shadow Telegram alert failed for %s", msg.message_id)
 

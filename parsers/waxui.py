@@ -68,6 +68,15 @@ class WaxuiParser:
         re.compile(r'Reduced risk', re.IGNORECASE),
         re.compile(r'Pillow secured', re.IGNORECASE),
         re.compile(r'\d+%\*$', re.IGNORECASE),  # "50%*" correction messages
+        # "Day Trade idea" watchlist posts ("*CRWV*, Day Trade idea… Love the
+        # 07/31 70Cs. Will alert any entry!") are NOT entries — Waxui alerts the
+        # real entry later. They are entry-shaped (ticker + a named contract), so
+        # they MUST be caught before they could reach Gemini and misfire as a BUY
+        # once Waxui goes executable. Real entries ("SPY here 07/22 747P Avg. 1.25")
+        # contain none of these markers, so live signals are unaffected.
+        re.compile(r'\bday\s*trade\s+idea\b', re.IGNORECASE),
+        re.compile(r'\balert\s+(?:any\s+|an\s+|the\s+)?entry\b', re.IGNORECASE),
+        re.compile(r'\bentry\s+alert\b', re.IGNORECASE),
     ]
     
     # Exit patterns (only these are real exits)
