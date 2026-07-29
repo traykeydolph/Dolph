@@ -27,3 +27,8 @@ bot.log
 
 # Daily report output (runtime, regenerated)
 reports/
+
+# health monitor + heartbeat (runtime)
+trading_bot.heartbeat
+.health_state.json
+trading_bot.stdout.log

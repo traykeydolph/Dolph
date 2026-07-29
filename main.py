@@ -283,6 +283,14 @@ class TradingBot:
                 except Exception:
                     logger.exception("Error in stop loss check")
 
+            # Heartbeat: prove the loop itself is alive (not just the process) for
+            # the external health monitor — a stalled poll loop stops updating this.
+            try:
+                with open(HEARTBEAT_FILE, "w") as _hb:
+                    _hb.write(datetime.now(timezone.utc).isoformat())
+            except Exception:
+                pass
+
             await asyncio.sleep(self.config.polling_interval)
 
     async def _poll_cycle(self):
@@ -1423,6 +1431,7 @@ class TradingBot:
 # ── entry point ───────────────────────────────────────────────────
 
 PID_FILE = os.path.join(os.path.dirname(__file__), "trading_bot.pid")
+HEARTBEAT_FILE = os.path.join(os.path.dirname(__file__), "trading_bot.heartbeat")
 
 
 def _check_pid_lock():
