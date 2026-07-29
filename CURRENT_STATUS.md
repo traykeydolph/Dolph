@@ -53,13 +53,15 @@ truth for continuity.*
   hold-to-exit +$47 / peak +$501 — SPY needs trim discipline to be profitable.
 - **Landed:** PR #1 (`feat/ace-parser-and-waxui-shadow`) open into `main`. Blocker 1 fix pushed to
   `fix/missed-exit-on-restart` (`9dafff2`, PR #2). Project skills (start/stop/eod) committed.
-- **🎯 New plan (Tray, 07-28): drive toward a 30-day clean streak on FIXED code.** Fixing execution
-  logic re-baselines the streak (the 5 Gate-1 days were on old, wrong-P&L code — that's fine, we
-  WANT the 30-day count to run on final code). Sequence: **#1 Blocker 2 (🟢 DONE)** → **#2 VPS +
-  health alerting + auto-restart** (Tray provisioning) → **#3 automated daily verification gate**
-  (folds in reconcile_fills + shadow_pnl so Waxui accrues an "as-if-live" record) → **#4 Blockers
-  3 & 4.** Discipline: NO new analysts / NO Waxui execution during the streak. Waxui tracked
-  hypothetically (shadow_pnl) so all 3 can be judged for production at day 30.
+- **🎯 Plan (Tray, 07-28): 30-day clean streak on FIXED code.** Re-baselined (the 5 Gate-1 days were
+  on old wrong-P&L code). Sequence: **#1 Blocker 2 🟢 DONE** → **#2 VPS kit 🟢 BUILT** (deploy/,
+  health_monitor.py; Tray provisioning the box) → **#3 daily verification gate 🟢 DONE**
+  (`daily_verify.py`: refreshes reconcile+shadow_pnl, checks parser-errors/exec-failures/
+  position-sync/pnl-integrity, CLEAN/DIRTY verdict + streak N/30 to Telegram, Alpaca-calendar
+  market days only) → **#4 Blockers 3 & 4 (next).** Discipline: NO new analysts / NO Waxui
+  execution during the streak; Waxui accrues an as-if-live record via shadow_pnl for the day-30
+  all-3 production call. **The verify gate flags 07-28 DIRTY** (CSCO Δ−$30, old-code booking) — so
+  the streak correctly starts at 0 and only counts clean, fixed-code days.
 - **Gemini key fixed (07-28)** — valid key in .env; health probe passes. Also added
   `tests/conftest.py` stubbing the live Gemini API off in the suite (a valid key made tests hit the
   real API — 14s + a flaky failure; now deterministic/offline again).

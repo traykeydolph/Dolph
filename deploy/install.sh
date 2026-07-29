@@ -12,7 +12,9 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_USER="${SUDO_USER:-$USER}"
 UNIT_DIR="/etc/systemd/system"
-UNITS=(trading-bot.service trading-bot-health.service trading-bot-health.timer)
+UNITS=(trading-bot.service
+       trading-bot-health.service trading-bot-health.timer
+       trading-bot-verify.service trading-bot-verify.timer)
 
 if [[ $EUID -ne 0 ]]; then
   echo "Please run with sudo (needs to write $UNIT_DIR)." >&2
@@ -34,8 +36,8 @@ for unit in "${UNITS[@]}"; do
 done
 
 systemctl daemon-reload
-systemctl enable trading-bot.service trading-bot-health.timer
-systemctl start trading-bot-health.timer
+systemctl enable trading-bot.service trading-bot-health.timer trading-bot-verify.timer
+systemctl start trading-bot-health.timer trading-bot-verify.timer
 
 echo
 echo "Installed + enabled. NOT started the bot yet."

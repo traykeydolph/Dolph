@@ -32,3 +32,4 @@ reports/
 trading_bot.heartbeat
 .health_state.json
 trading_bot.stdout.log
+.verify_state.json

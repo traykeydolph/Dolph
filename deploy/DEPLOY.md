@@ -75,7 +75,13 @@ sudo ./deploy/install.sh   # templates USER+APP_DIR, installs 3 units, enables t
 
 This installs and **enables** (start-on-boot):
 - `trading-bot.service` — the bot, `Restart=on-failure` (a clean stop stays stopped).
-- `trading-bot-health.timer` → `trading-bot-health.service` — the monitor, every 5 min.
+- `trading-bot-health.timer` → `-health.service` — the health monitor, every 5 min.
+- `trading-bot-verify.timer` → `-verify.service` — the daily verification gate,
+  weekdays 21:30 UTC (≥30 min after the 15:00 CT close). It refreshes the
+  reconciliation + Waxui shadow P&L, checks the day was CLEAN (zero parser errors,
+  no failed trades, DB↔Alpaca in sync, P&L reconciles to real fills), Telegrams a
+  CLEAN/DIRTY verdict, and advances the consecutive-clean-day streak toward 30.
+  A DIRTY day resets the streak. Only Alpaca-calendar market days count.
 
 It does **not** start the bot yet — you do that once you've eyeballed `.env`.
 
@@ -116,6 +122,10 @@ sudo systemctl restart trading-bot
 
 # manual health check
 cd ~/trading && ./venv/bin/python health_monitor.py
+
+# manual daily verification (CLEAN/DIRTY verdict + streak; --dry-run = no Telegram)
+./venv/bin/python daily_verify.py --dry-run
+systemctl list-timers 'trading-bot-*'          # next scheduled runs
 
 # EOD review / dashboards still work exactly the same
 ./venv/bin/python reconcile_fills.py
