@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 from config import Config
@@ -18,6 +19,22 @@ from parsers.ace import AceParser
 from parsers.obsidian_matcher import match as obsidian_match, append_to_library
 
 logger = logging.getLogger(__name__)
+
+# Discord mentions (<@123>, <@!123>, <@&123>, <#123>), custom emoji
+# (<:name:123>, <a:name:123>), and @everyone/@here — none of which are signal.
+_MENTION_EMOJI_RE = re.compile(r'<[@#][!&]?\d+>|<a?:\w+:\d+>|@everyone|@here')
+
+
+def _content_is_noise_only(text: str) -> bool:
+    """True when a message carries no real text — only Discord mentions,
+    custom emoji, and/or punctuation. A bare role-ping ('<@&697950067285295115>')
+    reached the Gemini tier on 07-30 and a Google 504 tripped the daily gate;
+    such messages must be dropped before any LLM call. Conservative: if any
+    alphanumeric character survives mention/emoji stripping, it is NOT noise."""
+    if not text or not text.strip():
+        return True
+    stripped = _MENTION_EMOJI_RE.sub('', text)
+    return not any(ch.isalnum() for ch in stripped)
 
 
 class SignalRouter:
@@ -72,7 +89,15 @@ class SignalRouter:
 
         # Decode obfuscated tickers (especially for Waxui)
         decoded_content = self.ticker_decoder.decode_message(content, channel_id)
-        
+
+        # Global noise guard: a message whose own content is only mentions /
+        # custom-emoji (e.g. a bare role-ping "<@&123>") carries no signal.
+        # Drop it before the LLM tier — one such ping + a Google 504 tripped
+        # the daily gate on 07-30 (harmless message, real streak reset).
+        if _content_is_noise_only(decoded_content):
+            logger.info("Mention/emoji-only message — global noise short-circuit: %s", message_id)
+            return None
+
         # Prepend referenced (quoted) message for context — critical for Grizzlies
         # where replies like "Trimming half here" reference the original entry
         parse_content = decoded_content

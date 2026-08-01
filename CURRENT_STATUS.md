@@ -1,6 +1,6 @@
 # Current Status — Trading Bot
 
-*Single orientation doc. Last updated: 2026-07-29 (EOD). Read this + `CLAUDE.md` +
+*Single orientation doc. Last updated: 2026-08-01 (EOD, multi-day). Read this + `CLAUDE.md` +
 `RESTART_PLAN.md` + `LIVE_SAFETY.md` (pre-live blockers) at the start of any session. Keep the
 "Where we are" and "Open items" sections current — this file, not chat history, is the source of
 truth for continuity.*
@@ -8,12 +8,38 @@ truth for continuity.*
 ---
 
 ## Where we are (TL;DR)
-- 07-29 session on branch `fix/missed-exit-on-restart`. Three analysts live: Eva + Ace
-  **execute** on Alpaca paper; Waxui **shadow / log-only**. Clean SIGTERM stop 07-29 17:45 CT.
-- **🎯 30-day clean streak (FIXED code): 1/30 · first CLEAN day banked (07-29).** The
-  `daily_verify` gate returned **CLEAN · streak 1/30** — parser-errors ✅, exec-failures ✅,
-  position-sync (DB 0 / Alpaca 0) ✅, pnl-integrity (booked ≈ real) ✅. This is the real,
-  re-baselined clock (the old "5/5 Gate-1 days" ran on wrong-P&L code and don't count).
+- **08-01 (Sat) multi-day EOD.** The bot ran **continuously 07-30 07:27 → 08-01 12:06 CT**
+  (one process, ~2 days — a real Blocker-1 endurance test; cursor persistence + resume held
+  across two overnights and several Discord 503s). Branch `fix/missed-exit-on-restart`.
+  Eva + Ace execute on Alpaca paper; Waxui shadow.
+- **🎯 30-day clean streak: back to 1/30.** 07-29 CLEAN → **07-30 DIRTY** → 07-31 CLEAN.
+  The 07-30 DIRTY **reset** the streak; 07-31 is the current run's day 1.
+- **🟥 07-30 DIRTY — a Gemini `504 Gateway Timeout` (benign cause, real trip).** An Eva
+  message fell through to the LLM tier and Google returned 504 → logged a parser ERROR →
+  `daily_verify` correctly flagged DIRTY. **The message was harmless:** its content was a
+  bare Discord role-ping `<@&697950067285295115>` (no text) — pure noise, no signal missed,
+  code caught it cleanly (no crash/freeze). But it exposes two cheap gaps → see Open items:
+  (a) bare `<@&…>`-only messages should be caught by the **noise filter** before ever
+  reaching Gemini; (b) Gemini has **no retry** on transient 5xx. **🟢 Both fixed 08-01**
+  (global mention/emoji-only noise guard in `signal_router`; Gemini retries once on a
+  transient 5xx) — `tests/test_noise_and_gemini_retry.py` (22), suite 449 green. See
+  `CHANGELOG.md` (new running tracking log of code changes).
+- **🟢 07-31 CLEAN — the star day. FIRST LIVE FIRING of the Blocker-3 fill ladder (#4).**
+  Eva **SPY 720P** entry: rung 1 limit @ $3.19 unfilled in 3.0s → **repriced to capped limit
+  $3.44 (rung 2)** → filled **$3.25** — bounded escalation, **NO naked market order**. This is
+  the live validation of #4 that was pending. Also **IREN 34.5P** full lifecycle: entry $0.32
+  → trim/exit $0.48 = **+$16 real** (booked +$16, Δ0 — Blocker 2 holding). Safety guards all
+  fired right: NVDA trims skipped (no position), 3rd IREN trim skipped (already closed),
+  duplicate SPY entry skipped. **Zero parser errors.**
+- **🟢 Teardown fix confirmed live:** the 08-01 shutdown logged a **single** `Bot stopped.`
+  (was a double before #4). Idempotent `stop()` working.
+- **⚠️ OPEN POSITION carried, bot DOWN:** Eva **SPY 720P (#77)**, 1 qty, entry **$3.25**,
+  opened 07-31 12:07 CT, exp 2026-08-21 — **still open** (DB 1 / Alpaca 1, in sync). The bot
+  stopped 08-01 12:06 CT when the launching Claude Code background task was torn down
+  (SIGTERM → clean stop; Telegram DNS also flaky at that instant). **ACTION: the bot MUST be
+  running before Monday 08-03 open** to catch any SPY exit — otherwise that's a real
+  missed-exit risk. This re-confirms *why the VPS matters* (run-as-background-task dies with
+  the session).
 - **07-29 was a clean day, account now flat:** Eva ran **2 ideas** — both carried positions closed.
   **OKLO 43C** trim→full-close (entry $0.68 → fill **$0.22**, real **−$46**) and **RKLB 70C**
   trim→full-close (entry $0.72 → fill **$0.33**, real **−$39**). Total real **−$85** (booked −$85,
@@ -37,7 +63,8 @@ truth for continuity.*
   (+$15). A losing trade recorded as a winner. Reconciled against Alpaca: **all-time real +$198 vs
   booked +$233** (Δ −$35). The booked track record is not trustworthy trade-by-trade — this is now
   the top pre-live fix. (Blocker 3's 15s→market escalation caused the bad CSCO fill.)
-- **Open positions: NONE — account flat into 07-30** (both 07-28 carries closed 07-29; DB 0 / Alpaca 0).
+- **Open positions (1): Eva SPY 720P (#77)** — entry $3.25, opened 07-31, exp 08-21. Carried over the
+  weekend with the bot DOWN. Restart before Monday 08-03 open (see TL;DR action).
 - **🟢 Blocker 1 fixed + live-verified** (`9dafff2`, pushed). `check_same_thread=False` + per-instance
   RLock on all DB methods; `poll_cursor` persists and reloads on restart. Confirmed across the
   07-28 restart (resumed, not re-seeded).

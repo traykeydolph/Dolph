@@ -5,6 +5,7 @@ Gracefully degrades if API key is missing/invalid.
 """
 
 import logging
+import time
 from typing import Optional
 
 from config import Config
@@ -93,6 +94,40 @@ class GeminiParser:
         except Exception as e:  # noqa: BLE001 — surface the reason
             return False, str(e).splitlines()[0][:180]
 
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        """A retry-worthy failure: a 5xx / timeout / 'unavailable' from Google's
+        side (e.g. the 504 Gateway Timeout that tripped the gate on 07-30), not a
+        4xx we caused. Best-effort match on the SDK error's code/text."""
+        s = f"{getattr(exc, 'code', '')} {getattr(exc, 'status', '')} {exc}".lower()
+        return any(t in s for t in
+                   ("500", "502", "503", "504", "timeout", "deadline",
+                    "unavailable", "gateway", "overloaded"))
+
+    def _generate_text(self, prompt: str, message_id: str) -> str:
+        """Call Gemini once, retrying ONCE on a transient server error. The
+        per-call timeout (Blocker 4) still bounds each attempt, so worst case is
+        two bounded waits, never a hang."""
+        last_exc = None
+        for attempt in (1, 2):
+            try:
+                if _genai_version == "new":
+                    resp = self._client.models.generate_content(
+                        model="gemini-2.5-flash", contents=prompt)
+                else:
+                    resp = self.model.generate_content(
+                        prompt, request_options={"timeout": self._timeout_s})
+                return resp.text
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                if attempt == 1 and self._is_transient(e):
+                    logger.warning("Gemini transient error on msg %s (%s) — retrying once",
+                                   message_id, str(e).splitlines()[0][:120])
+                    time.sleep(0.75)
+                    continue
+                raise
+        raise last_exc
+
     def parse(self, message: str, channel_id: str, message_id: str,
               timestamp: str, hint_action: str = None) -> Optional[ParsedSignal]:
         """Parse Discord message using Gemini Flash."""
@@ -106,18 +141,8 @@ class GeminiParser:
             # Get analyst-specific prompt
             prompt = self._build_prompt(message, analyst, hint_action=hint_action)
 
-            # Generate response (supports both SDK versions)
-            if _genai_version == "new":
-                response = self._client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=prompt,
-                )
-                response_text = response.text
-            else:
-                response = self.model.generate_content(
-                    prompt, request_options={"timeout": self._timeout_s}
-                )
-                response_text = response.text
+            # Generate response (both SDK versions; retries once on a transient 5xx)
+            response_text = self._generate_text(prompt, message_id)
 
             # Parse structured response
             parsed_signal = self._extract_signal(
