@@ -7,6 +7,28 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 
 ---
 
+## 2026-08-01 — Signal Library path is now portable (VPS parity)
+
+The Obsidian Signal Library (Tier 1/2 matching source) loaded from a **hardcoded
+Mac path** (`/Users/tray/Documents/…/Signal Library`). On the VPS that path doesn't
+exist, so the library loaded **empty** and the box silently parsed **regex-only** —
+a different classifier than we validated (caught by a Waxui replay test that
+returned `exit` instead of `trim` on the box).
+
+- `parsers/obsidian_matcher.py`: `SIGNAL_LIBRARY_PATH` is now
+  `os.getenv("SIGNAL_LIBRARY_PATH", <mac default>)` — local dev unchanged; any
+  non-Mac host sets the env var. The 284K library is deployed to the box and
+  `SIGNAL_LIBRARY_PATH` points at it in the box `.env`.
+
+*Why:* the VPS must parse **identically** to what we test locally — an empty
+library is a silent behavior change. *Verified:* full suite 449 green on the box
+after the library was deployed and the env var set.
+
+*Follow-up to consider:* vendor the library into the repo so deploys carry it
+automatically (trade-off: a committed copy can drift from the Obsidian master).
+
+---
+
 ## 2026-08-01 — requirements.txt fix (clean-deploy correctness)
 
 Found while rebuilding the Hetzner VPS from a clean `git clone`: `requirements.txt`
