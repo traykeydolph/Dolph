@@ -12,16 +12,20 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 Found while rebuilding the Hetzner VPS from a clean `git clone`: `requirements.txt`
 did not match what the code actually imports, so a fresh install was broken.
 
-- Replaced `alpaca-py` → **`alpaca-trade-api==3.2.0`** (code imports `alpaca_trade_api`,
-  not the `alpaca` module; local venv had the right one, requirements didn't).
-- Added **`telethon`** (inbound Telegram client) and **`coinbase-advanced-py`**
-  (crypto client) — both imported at runtime, both were missing.
+- Dropped `alpaca-py` (never imported). The code uses **`alpaca-trade-api==3.2.0`**
+  (`import alpaca_trade_api`), which is the deprecated Alpaca SDK with stale pins
+  (`websockets<11`, `urllib3<2`) that make the pip resolver fail against the modern
+  stack. It's now installed as a documented **`--no-deps`** second step (we only use
+  its REST API, not streaming) — see the note in `requirements.txt` and `DEPLOY.md §3`.
+- Added **`telethon`** (inbound Telegram) and **`coinbase-advanced-py`** (crypto) —
+  both imported at runtime, both were missing.
 - Added **`google-genai`** (the new Gemini SDK the code prefers; `google-generativeai`
   stays as the documented fallback).
 
 *Why:* the local dev venv worked only because these were installed ad-hoc; a
-reproducible deploy (VPS, CI, DEPLOY.md) needs them declared. *Verified:* fresh
-`pip install -r requirements.txt` + `import main` clean on the box (Python 3.12).
+reproducible deploy (VPS, CI, DEPLOY.md) needs them declared. *Verified:* clean
+`pip install -r requirements.txt` + the `--no-deps` alpaca step + `import main` OK
+on the Hetzner box (Python 3.12), new Gemini SDK loaded.
 
 ---
 

@@ -42,7 +42,13 @@ cd ~/trading
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests/ -q     # sanity: expect ~410 passed
+# Broker SDK: installed separately — it's the deprecated alpaca-trade-api with
+# stale pins that break the resolver; we only use its REST API. (See the note at
+# the bottom of requirements.txt.)
+./venv/bin/pip install --no-deps alpaca-trade-api==3.2.0
+./venv/bin/pip install deprecation PyYAML websocket-client
+./venv/bin/python -c "import main; print('import OK')"   # smoke test
+./venv/bin/python -m pytest tests/ -q     # sanity: expect ~449 passed
 ```
 
 ## 4. Secrets — copy `.env` securely (it is gitignored, by design)
