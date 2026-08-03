@@ -6,14 +6,18 @@ so it can report the bot being DOWN. Probes the things that can fail *silently* 
 the ones the bot itself won't notice until it's too late:
 
   • heartbeat  — the poll loop writes trading_bot.heartbeat each cycle; stale or
-                 missing = process dead OR loop hung.
-  • alpaca     — account reachable (auth/API broken → next trade would fail).
-  • gemini     — the fallback that died silently for days in July and nobody knew.
-  • database   — real read + write probe (disk full / locked).
+                 missing = process dead OR loop hung.          [CRITICAL]
+  • alpaca     — account reachable (auth/API broken → next trade would fail). [CRITICAL]
+  • database   — real read + write probe (disk full / locked).  [CRITICAL]
+  • gemini     — the LLM fallback (load-bearing for Waxui). Probed at most once an
+                 hour, because the live probe costs an API call and at 5-min cadence
+                 it alone exhausted the free-tier daily quota it was meant to watch.
+                 A down fallback ALERTS but is NON-CRITICAL (doesn't fail the run).
 
 Alerts to Telegram on a NEW failure, again on RECOVERY, and once a day as an
 "all healthy" heartbeat so silence is meaningful. Dedups via .health_state.json
-so it never spams. Exit code 0 = all healthy, 1 = something failing.
+so it never spams. Exit code 0 = all CRITICAL healthy, 1 = a CRITICAL check failing
+(Gemini alone never trips the exit code / marks the systemd unit failed).
 
 Usage:  ./venv/bin/python health_monitor.py
 """
@@ -35,6 +39,14 @@ HEARTBEAT_FILE = os.path.join(HERE, "trading_bot.heartbeat")
 PID_FILE = os.path.join(HERE, "trading_bot.pid")
 STATE_FILE = os.path.join(HERE, ".health_state.json")
 HEARTBEAT_MAX_AGE = 180  # s — bot writes every ~15s; 3 min is generous slack
+
+# Checks that determine the exit code (and thus systemd unit success/failure).
+# Gemini is deliberately excluded — it's a fallback; its being down is worth an
+# alert but must not mark the whole health run "failed".
+CRITICAL = {"heartbeat", "alpaca", "database"}
+# The Gemini live probe costs an API call; at the 5-min timer cadence that was
+# ~288 calls/day, exhausting the free-tier quota. Probe at most this often.
+GEMINI_PROBE_INTERVAL = 3600  # seconds (hourly)
 
 
 # ── individual checks: each returns (ok: bool, detail: str) ─────────
@@ -69,6 +81,26 @@ def check_gemini(cfg):
         return GeminiParser(cfg).health_check()
     except Exception as e:  # noqa: BLE001
         return False, str(e).splitlines()[0][:140]
+
+
+def maybe_check_gemini(cfg, state, force=False):
+    """Live-probe Gemini at most once per GEMINI_PROBE_INTERVAL; otherwise reuse
+    the last result from state. The probe spends an API call, so hammering it
+    every 5 min (288/day) exhausted the very quota it exists to watch."""
+    last = state.get("gemini_last_probe")
+    due = force or not last
+    if last and not force:
+        try:
+            due = (time.time() - datetime.fromisoformat(last).timestamp()) >= GEMINI_PROBE_INTERVAL
+        except ValueError:
+            due = True
+    if due:
+        ok, detail = check_gemini(cfg)
+        state["gemini_last_probe"] = datetime.now(timezone.utc).isoformat()
+        state["gemini_last_ok"] = ok
+        state["gemini_last_detail"] = detail
+        return ok, f"{detail} (live)"
+    return state.get("gemini_last_ok", True), f"{state.get('gemini_last_detail', 'unknown')} (cached)"
 
 
 def check_database(cfg):
@@ -121,15 +153,16 @@ def save_state(state):
 def main():
     dry_run = "--dry-run" in sys.argv
     cfg = Config()
+    state = load_state()
     checks = {
         "heartbeat": check_heartbeat(),
         "alpaca": check_alpaca(cfg),
-        "gemini": check_gemini(cfg),
         "database": check_database(cfg),
+        # throttled: live-probes at most hourly (manual --dry-run always probes)
+        "gemini": maybe_check_gemini(cfg, state, force=dry_run),
     }
     failing = {k: detail for k, (ok, detail) in checks.items() if not ok}
 
-    state = load_state()
     prev = set(state.get("failing", []))
     now = set(failing)
     new_fail = now - prev
@@ -161,7 +194,10 @@ def main():
     # stdout for manual runs / journalctl
     for k, (ok, detail) in checks.items():
         print(f"{'✅' if ok else '❌'} {k:9s} {detail}")
-    return 0 if not now else 1
+    # Exit code (→ systemd unit success/failure) is driven by CRITICAL checks
+    # only. A down Gemini fallback already alerted above but must not fail the run.
+    critical_failing = now & CRITICAL
+    return 0 if not critical_failing else 1
 
 
 if __name__ == "__main__":

@@ -7,6 +7,28 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 
 ---
 
+## 2026-08-03 — Health monitor: stop burning Gemini quota
+
+The 5-min health timer live-probed Gemini every run (~288 calls/day), which by
+itself exhausted the **free-tier daily quota** — so the monitor was *causing* the
+`429` it then reported, and (because a down fallback returned exit 1) marking the
+systemd unit "failed" every 5 minutes. This also starved the quota that **Waxui's
+shadow validation** needs (≈38%, up to ~56% on busy days, of Waxui's actionable
+messages route through Gemini).
+
+- `health_monitor.py`: Gemini is now **probed at most hourly** (`maybe_check_gemini`
+  caches the last result in `.health_state.json` between probes; manual `--dry-run`
+  still probes live). It is also **non-critical** — a down Gemini still *alerts* on
+  state change but no longer drives the exit code (`CRITICAL = {heartbeat, alpaca,
+  database}`), so the systemd unit stops flapping "failed".
+- Tests: `tests/test_health_monitor_throttle.py` (8) — throttle, cache carry-forward,
+  force-on-dry-run, and the critical-only exit rule. Suite 457 green.
+
+*Interim measure* until Gemini API billing is enabled (the free tier only 2x'd via
+Google One AI Plus is a **consumer** plan and does not lift the API quota).
+
+---
+
 ## 2026-08-02 — Clean rebuild on Hetzner VPS (24/7 cutover)
 
 Replaced OpenClaw's stale pm2/root deploy on `5.78.207.151` with a clean systemd
