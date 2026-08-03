@@ -7,6 +7,24 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 
 ---
 
+## 2026-08-01 — requirements.txt fix (clean-deploy correctness)
+
+Found while rebuilding the Hetzner VPS from a clean `git clone`: `requirements.txt`
+did not match what the code actually imports, so a fresh install was broken.
+
+- Replaced `alpaca-py` → **`alpaca-trade-api==3.2.0`** (code imports `alpaca_trade_api`,
+  not the `alpaca` module; local venv had the right one, requirements didn't).
+- Added **`telethon`** (inbound Telegram client) and **`coinbase-advanced-py`**
+  (crypto client) — both imported at runtime, both were missing.
+- Added **`google-genai`** (the new Gemini SDK the code prefers; `google-generativeai`
+  stays as the documented fallback).
+
+*Why:* the local dev venv worked only because these were installed ad-hoc; a
+reproducible deploy (VPS, CI, DEPLOY.md) needs them declared. *Verified:* fresh
+`pip install -r requirements.txt` + `import main` clean on the box (Python 3.12).
+
+---
+
 ## 2026-08-01 — Noise + Gemini-retry hardening
 
 Prompted by the **07-30 DIRTY day**: a bare Discord role-ping

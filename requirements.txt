@@ -1,10 +1,16 @@
 python-dotenv
+# Gemini: new SDK (`from google import genai`) is preferred; legacy is the fallback.
+google-genai
 google-generativeai
-alpaca-py
+# Broker: code imports `alpaca_trade_api` (the alpaca-trade-api pkg), NOT alpaca-py.
+alpaca-trade-api==3.2.0
+# Crypto (Coinbase) + inbound Telegram (Telethon) clients — both imported at runtime.
+coinbase-advanced-py
+telethon
 python-telegram-bot
 aiohttp
 requests
-pytest
-pytest-asyncio
 gspread
 google-auth
+pytest
+pytest-asyncio
