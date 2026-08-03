@@ -8,6 +8,25 @@ truth for continuity.*
 ---
 
 ## Where we are (TL;DR)
+- **🟢🖥️ LIVE ON HETZNER 24/7 (08-02 night).** The bot now runs on the VPS
+  (`5.78.207.151`, Ubuntu, Python 3.12) under **systemd** as a non-root `trader` user —
+  a clean rebuild replacing OpenClaw's stale pm2 setup (which had a **dead Discord token**,
+  was inert for ~3 months, and ran pre-blocker code). Health check 7-green, Discord token
+  **valid**, SPY 720P handed off (DB 1 / Alpaca 1 in sync), health timer (5-min) + verify
+  timer (weekdays 21:30 UTC) enabled, boot-persistent. Single instance confirmed.
+- **‼️ ONE-BOT RULE — do NOT run the Mac bot anymore.** The box is the single live bot on
+  paper account `PA3OQ9Y8K2X7`. Running the local Mac bot at the same time = two pollers →
+  duplicate orders. The Mac is now **dev only**; the box is production.
+- **Ops moved to systemd (the pm2/rsync Obsidian cheatsheet is OBSOLETE):**
+  - deploy code: `git push` → on box `sudo -u trader git -C /home/trader/trading pull` → `sudo systemctl restart trading-bot`
+  - status/logs: `ssh root@5.78.207.151 'journalctl -u trading-bot -f'`
+  - start/stop: `sudo systemctl {start,stop,restart} trading-bot`
+  - EOD/reconcile/verify now run **on the box** (its DB is the live one; the Mac DB is stale).
+- **Deploy hardening committed today** (see `CHANGELOG.md`): requirements.txt fixed for clean
+  installs (`--no-deps` alpaca; added telethon/coinbase/google-genai); Signal Library path made
+  env-configurable (was a hardcoded Mac path → VPS parsed regex-only); `config/` creds + library
+  + DB deployed to the box.
+
 - **08-01 (Sat) multi-day EOD.** The bot ran **continuously 07-30 07:27 → 08-01 12:06 CT**
   (one process, ~2 days — a real Blocker-1 endurance test; cursor persistence + resume held
   across two overnights and several Discord 503s). Branch `fix/missed-exit-on-restart`.
@@ -36,10 +55,9 @@ truth for continuity.*
 - **⚠️ OPEN POSITION carried, bot DOWN:** Eva **SPY 720P (#77)**, 1 qty, entry **$3.25**,
   opened 07-31 12:07 CT, exp 2026-08-21 — **still open** (DB 1 / Alpaca 1, in sync). The bot
   stopped 08-01 12:06 CT when the launching Claude Code background task was torn down
-  (SIGTERM → clean stop; Telegram DNS also flaky at that instant). **ACTION: the bot MUST be
-  running before Monday 08-03 open** to catch any SPY exit — otherwise that's a real
-  missed-exit risk. This re-confirms *why the VPS matters* (run-as-background-task dies with
-  the session).
+  (SIGTERM → clean stop). **✅ RESOLVED:** the position was handed off to the Hetzner box
+  (08-02) which now runs 24/7 and will catch the SPY exit — no Monday manual restart needed
+  (and the Mac bot must stay OFF, per the ONE-BOT rule above).
 - **07-29 was a clean day, account now flat:** Eva ran **2 ideas** — both carried positions closed.
   **OKLO 43C** trim→full-close (entry $0.68 → fill **$0.22**, real **−$46**) and **RKLB 70C**
   trim→full-close (entry $0.72 → fill **$0.33**, real **−$39**). Total real **−$85** (booked −$85,

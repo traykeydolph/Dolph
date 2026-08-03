@@ -7,6 +7,24 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 
 ---
 
+## 2026-08-02 — Clean rebuild on Hetzner VPS (24/7 cutover)
+
+Replaced OpenClaw's stale pm2/root deploy on `5.78.207.151` with a clean systemd
+build: non-root `trader` user, `git clone` on branch `fix/missed-exit-on-restart`,
+proper venv, `.env` + `config/` creds + Signal Library + `trading_bot.db` (carrying
+the open SPY 720P + poll cursors) copied over. Installed the 5 systemd units
+(bot + health timer + verify timer), all boot-persistent. Health check 7-green,
+Discord token valid (the old box's was dead → 401s for ~3 months), positions in
+sync 1/1, single instance confirmed, pm2 removed.
+
+**Operational change:** the box is now the single live bot; the Mac is dev-only
+(ONE-BOT rule — two pollers on one paper account = duplicate orders). Ops are
+systemd now, not pm2 (`systemctl {start,stop,restart} trading-bot`,
+`journalctl -u trading-bot -f`). The three deploy-hardening commits below made
+the clean rebuild possible.
+
+---
+
 ## 2026-08-01 — Signal Library path is now portable (VPS parity)
 
 The Obsidian Signal Library (Tier 1/2 matching source) loaded from a **hardcoded
