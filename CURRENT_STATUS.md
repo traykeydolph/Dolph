@@ -8,6 +8,20 @@ truth for continuity.*
 ---
 
 ## Where we are (TL;DR)
+- **🗓️ 08-03 (Mon) EOD — 🚨 DIRTY · streak 0/30, but a critical bug was caught & fixed.**
+  - **Headline:** Eva's SPY 720P exit **double-filled** — rung 1 (limit @1.68) AND the capped
+    rung (@1.60) both filled → sold 2 holding 1 → **went short 1** while the DB booked a clean
+    close. Root cause: the fill ladder cancelled a rung and **resubmitted the full qty** without
+    confirming the cancel beat the fill. **🟢 FIXED** (`5e98a2f`): `_cancel_and_settle` reads each
+    rung's terminal fill; ladders now escalate only the *unfilled remainder* (tests +2, suite 459).
+    Deployed; bot restarted on fixed code.
+  - **Erroneous short flattened:** bounded limit buy queued (fills at 08-04 open) → confirm it filled.
+  - **The good part:** the box **caught Eva's SPY exit across the Mac→box handoff** (knew it held SPY,
+    acted on the close). Blocker-1 *seeing* the exit worked; the bug was in *how* it executed.
+  - **DIRTY drivers:** parser-errors (5 — all **Waxui shadow-path** Gemini 429s from the quota
+    exhaustion, pre-health-fix) + position-sync/pnl (the double-fill). exec-failures ✅.
+  - **Health-monitor Gemini quota fix** landed 08-04 00:33 UTC (throttle + non-critical) — Gemini is
+    **reachable again** as of the restart. See [[CHANGELOG]].
 - **🟢🖥️ LIVE ON HETZNER 24/7 (08-02 night).** The bot now runs on the VPS
   (`5.78.207.151`, Ubuntu, Python 3.12) under **systemd** as a non-root `trader` user —
   a clean rebuild replacing OpenClaw's stale pm2 setup (which had a **dead Discord token**,

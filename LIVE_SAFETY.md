@@ -175,6 +175,13 @@ that order id (reconcile against the broker, not the message).
 > `tests/test_blocker34_fill_ladder.py` (entry never markets; exit rungs bounded &
 > descending; market backstop guarantees flat). **Still pending → 🟢:** observe a real
 > escalation in a paper session and confirm the alert + booked fill match.
+>
+> **⚠️ 08-03 — a DOUBLE-FILL bug was found in this fix and re-fixed (`5e98a2f`).** A real SPY
+> 720P exit filled on BOTH rung 1 and the capped rung (cancel lost the race with the fill) →
+> sold 2 holding 1 → went short. The ladder now `_cancel_and_settle`s each rung and escalates
+> only the unfilled remainder (regression tests: `TestNoDoubleFillOnRace`). This bug is why the
+> live-escalation observation is a hard gate — a double-fill is worse than the market overpay it
+> replaced (unintended opposite position). Re-verify on the next real escalation.
 
 ### Failure mode
 `execute_entry_order()` replaces an unfilled limit with a **market** order after 15s
