@@ -15,6 +15,7 @@ Discord-signal-following trading bot. Polls analyst channels (Zabes, Grizzlies, 
 
 - **Safety first.** This bot spends real money when live. Bias toward correctness and verification over speed. Never weaken exit verification, duplicate-position guards, or timeout protection.
 - **Paper before live, always.** Gate 1 = 5 clean market days, 5+ complete trade lifecycles, zero parser errors, zero silent failures.
+- **Adding an analyst?** Follow `ANALYST_ONBOARDING.md` — the repeatable build→shadow→paper→live process. Analysts are a parser + tests + a config toggle, never a long-lived branch; runtime `ENABLED_ANALYSTS`/`SHADOW_ANALYSTS` is the on/off axis.
 - Run tests with: `./venv/bin/python -m pytest tests/ -v`
 - Position reconciliation tool: `./venv/bin/python sync_positions.py` (dry run; `--fix` to resolve)
 - Discord auth uses a user token in `.env` (ToS-fragile; bot-account migration deferred). Verify the token with a real API call before trusting it.

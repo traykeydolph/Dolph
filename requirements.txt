@@ -1,10 +1,25 @@
+# Standard deps — `pip install -r requirements.txt` resolves these cleanly.
 python-dotenv
+# Gemini: new SDK (`from google import genai`) is preferred; legacy is the fallback.
+google-genai
 google-generativeai
-alpaca-py
+# Crypto (Coinbase) + inbound Telegram (Telethon) clients — both imported at runtime.
+coinbase-advanced-py
+telethon
 python-telegram-bot
 aiohttp
 requests
-pytest
-pytest-asyncio
 gspread
 google-auth
+pytest
+pytest-asyncio
+
+# ── Installed SEPARATELY (do not add above) ──────────────────────────────────
+# alpaca-trade-api==3.2.0 is the broker SDK the code imports (`alpaca_trade_api`).
+# It is the deprecated Alpaca SDK with STALE transitive pins (websockets<11,
+# urllib3<2) that conflict with the modern stack and make the resolver fail. Its
+# real runtime deps are already satisfied above, and we only use its REST API
+# (not streaming), so install it WITHOUT deps as a second step:
+#
+#     pip install --no-deps alpaca-trade-api==3.2.0
+#     pip install deprecation PyYAML websocket-client   # small sub-deps it needs

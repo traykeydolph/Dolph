@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the daily verification gate after market close
+
+[Timer]
+# 21:30 UTC = 16:30 CT in summer (CDT) / 15:30 CT in winter (CST) — always
+# >=30 min after the 15:00 CT options close, both DST states. The script
+# self-gates on the Alpaca calendar, so weekends/holidays no-op harmlessly.
+OnCalendar=Mon..Fri 21:30:00
+Persistent=true
+Unit=trading-bot-verify.service
+
+[Install]
+WantedBy=timers.target

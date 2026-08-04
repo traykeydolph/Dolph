@@ -73,14 +73,55 @@ def _signal_fields(signal: Optional[ParsedSignal]) -> dict:
     }
 
 
+def would_execute(signal: Optional[ParsedSignal]) -> bool:
+    """Would this parse place an order in production? Actionable (not info),
+    confident enough to clear the 0.8 execution floor, and executable on Alpaca
+    (not a cash-settled index / crypto). This is the audit's safety flag: a
+    True on a message that ISN'T really a signal = a false-entry we caught."""
+    if signal is None:
+        return False
+    action = getattr(signal.action, "value", signal.action)
+    if action in (None, "info"):
+        return False
+    conf = signal.confidence
+    if not isinstance(conf, (int, float)) or conf < 0.8:
+        return False
+    return classify_instrument(signal)["executable_on_alpaca"]
+
+
+def _gemini_fields(gemini_signal, gemini_ran, gemini_error, gemini_available):
+    base = {"gemini_ran": gemini_ran, "gemini_available": gemini_available,
+            "gemini_error": gemini_error, "gemini_action": None,
+            "gemini_ticker": None, "gemini_strike": None, "gemini_expiry": None,
+            "gemini_price": None, "gemini_confidence": None, "gemini_executable": None}
+    if gemini_signal is not None:
+        base.update({
+            "gemini_action": getattr(gemini_signal.action, "value", gemini_signal.action),
+            "gemini_ticker": gemini_signal.ticker,
+            "gemini_strike": gemini_signal.strike,
+            "gemini_expiry": gemini_signal.expiry,
+            "gemini_price": gemini_signal.entry_price,
+            "gemini_confidence": gemini_signal.confidence,
+            "gemini_executable": classify_instrument(gemini_signal)["executable_on_alpaca"],
+        })
+    return base
+
+
 def log_shadow_observation(analyst: str, channel_id: str, message_id: str,
                            content: str, timestamp: str,
                            signal: Optional[ParsedSignal], tier: str,
+                           gemini_signal: Optional[ParsedSignal] = None,
+                           gemini_ran: bool = False, gemini_error: str = None,
+                           gemini_available: Optional[bool] = None,
                            log_dir: str = None) -> Optional[str]:
     """Append one observation. Returns the path written, or None on failure.
 
-    Never raises — a logging problem must not disturb the polling loop.
+    Records BOTH parse verdicts (deterministic `signal` + LLM `gemini_signal`)
+    plus `would_execute` — whether this message would have placed an order in a
+    live run. Never raises — a logging problem must not disturb the polling loop.
     """
+    # Effective production signal: regex wins; Gemini only on a regex miss.
+    effective = signal if signal is not None else gemini_signal
     record = {
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "message_timestamp": timestamp,
@@ -90,8 +131,10 @@ def log_shadow_observation(analyst: str, channel_id: str, message_id: str,
         "raw_text": content,
         "tier": tier,
         "executed": False,          # invariant: the shadow path never trades
+        "would_execute": would_execute(effective),
         **_signal_fields(signal),
         **classify_instrument(signal),
+        **_gemini_fields(gemini_signal, gemini_ran, gemini_error, gemini_available),
     }
 
     directory = log_dir or LOG_DIR

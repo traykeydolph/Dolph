@@ -1,0 +1,10 @@
+[Unit]
+Description=Trading bot daily verification gate (one-shot; run by the .timer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%USER%
+WorkingDirectory=%APP_DIR%
+ExecStart=%APP_DIR%/venv/bin/python daily_verify.py

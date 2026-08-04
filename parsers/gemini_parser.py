@@ -5,6 +5,7 @@ Gracefully degrades if API key is missing/invalid.
 """
 
 import logging
+import time
 from typing import Optional
 
 from config import Config
@@ -48,11 +49,28 @@ class GeminiParser:
             logger.warning("Gemini SDK not installed — Tier 3 parsing disabled")
             return
 
+        # Blocker 4: a network blip that resolves DNS but can't complete the
+        # connection would otherwise hang the blocking genai call indefinitely
+        # (froze the test suite >2min once). A hard timeout converts that hang
+        # into a fast failure that parse()'s except already handles.
+        self._timeout_s = float(getattr(config, "gemini_timeout_seconds", 10) or 10)
+
         try:
             if _genai_version == "new":
-                self._client = _genai.Client(api_key=config.gemini_api_key)
+                http_options = None
+                try:
+                    # HttpOptions.timeout is in MILLISECONDS.
+                    http_options = _genai.types.HttpOptions(
+                        timeout=int(self._timeout_s * 1000)
+                    )
+                except Exception:
+                    logger.warning("google.genai HttpOptions unavailable — client timeout not set")
+                self._client = _genai.Client(
+                    api_key=config.gemini_api_key,
+                    http_options=http_options,
+                ) if http_options else _genai.Client(api_key=config.gemini_api_key)
                 self._available = True
-                logger.info("Gemini parser ready (google.genai SDK)")
+                logger.info("Gemini parser ready (google.genai SDK, timeout=%.0fs)", self._timeout_s)
             else:
                 _genai.configure(api_key=config.gemini_api_key)
                 self.model = _genai.GenerativeModel('gemini-2.5-flash')
@@ -60,6 +78,55 @@ class GeminiParser:
                 logger.info("Gemini parser ready (legacy SDK — consider upgrading to google.genai)")
         except Exception:
             logger.exception("Gemini initialization failed — Tier 3 parsing disabled")
+
+    def health_check(self) -> tuple[bool, str]:
+        """Actually probe the API. `_available` only means the client object
+        constructed — an INVALID key fails only on the first real call, so a
+        live probe is the only way to know the fallback works."""
+        if not self._available:
+            return False, "unavailable (no key or SDK)"
+        try:
+            if _genai_version == "new":
+                self._client.models.generate_content(model="gemini-2.5-flash", contents="ping")
+            else:
+                self.model.generate_content("ping", request_options={"timeout": self._timeout_s})
+            return True, "ok"
+        except Exception as e:  # noqa: BLE001 — surface the reason
+            return False, str(e).splitlines()[0][:180]
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        """A retry-worthy failure: a 5xx / timeout / 'unavailable' from Google's
+        side (e.g. the 504 Gateway Timeout that tripped the gate on 07-30), not a
+        4xx we caused. Best-effort match on the SDK error's code/text."""
+        s = f"{getattr(exc, 'code', '')} {getattr(exc, 'status', '')} {exc}".lower()
+        return any(t in s for t in
+                   ("500", "502", "503", "504", "timeout", "deadline",
+                    "unavailable", "gateway", "overloaded"))
+
+    def _generate_text(self, prompt: str, message_id: str) -> str:
+        """Call Gemini once, retrying ONCE on a transient server error. The
+        per-call timeout (Blocker 4) still bounds each attempt, so worst case is
+        two bounded waits, never a hang."""
+        last_exc = None
+        for attempt in (1, 2):
+            try:
+                if _genai_version == "new":
+                    resp = self._client.models.generate_content(
+                        model="gemini-2.5-flash", contents=prompt)
+                else:
+                    resp = self.model.generate_content(
+                        prompt, request_options={"timeout": self._timeout_s})
+                return resp.text
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                if attempt == 1 and self._is_transient(e):
+                    logger.warning("Gemini transient error on msg %s (%s) — retrying once",
+                                   message_id, str(e).splitlines()[0][:120])
+                    time.sleep(0.75)
+                    continue
+                raise
+        raise last_exc
 
     def parse(self, message: str, channel_id: str, message_id: str,
               timestamp: str, hint_action: str = None) -> Optional[ParsedSignal]:
@@ -74,16 +141,8 @@ class GeminiParser:
             # Get analyst-specific prompt
             prompt = self._build_prompt(message, analyst, hint_action=hint_action)
 
-            # Generate response (supports both SDK versions)
-            if _genai_version == "new":
-                response = self._client.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=prompt,
-                )
-                response_text = response.text
-            else:
-                response = self.model.generate_content(prompt)
-                response_text = response.text
+            # Generate response (both SDK versions; retries once on a transient 5xx)
+            response_text = self._generate_text(prompt, message_id)
 
             # Parse structured response
             parsed_signal = self._extract_signal(

@@ -191,6 +191,8 @@ def shadow_bot(tmp_path, monkeypatch):
     bot = object.__new__(main_module.TradingBot)
     bot.config = Config(discord_channel_waxui=WAXUI_CHANNEL,
                         db_path=str(tmp_path / "shadow_test.db"))
+    bot._gemini_ok = False          # audit runs regex-only unless a test flips this
+    bot._gemini_detail = "test"
 
     from storage.database import Database
     from signal_router import SignalRouter

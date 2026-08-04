@@ -1,0 +1,32 @@
+[Unit]
+Description=Discord Signal Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%APP_DIR%
+ExecStart=%APP_DIR%/venv/bin/python main.py
+
+# Auto-restart on crash (non-zero exit). A clean SIGTERM stop exits 0 and does
+# NOT restart, so `systemctl stop` / graceful shutdown stays down.
+Restart=on-failure
+RestartSec=10
+# Give up if it crash-loops (5 starts in 5 min) so a broken config pages you
+# via the health monitor instead of thrashing forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# The bot handles SIGTERM: closes async tasks, removes its pidfile, logs
+# "Bot stopped." Give it room to finish.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+# The bot logs to %APP_DIR%/trading_bot.log itself (rotating). journald captures
+# anything printed before logging initialises.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the trading bot health monitor every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Don't fire a burst of missed runs after the VPS wakes from sleep/downtime.
+Persistent=false
+Unit=trading-bot-health.service
+
+[Install]
+WantedBy=timers.target

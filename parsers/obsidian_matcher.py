@@ -19,7 +19,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-SIGNAL_LIBRARY_PATH = "/Users/tray/Documents/Dolph & Tray/Trading/Signal Library"
+# Path to the validated Signal Library (Tier 1/2 source). Configurable so it
+# works off the dev Mac too — a hardcoded local path meant the VPS loaded an
+# EMPTY library and silently parsed differently (regex-only). Set
+# SIGNAL_LIBRARY_PATH in .env on any non-Mac host.
+SIGNAL_LIBRARY_PATH = os.getenv(
+    "SIGNAL_LIBRARY_PATH",
+    "/Users/tray/Documents/Dolph & Tray/Trading/Signal Library",
+)
 
 # Map analyst names in config to folder names in vault
 ANALYST_FOLDER_MAP = {

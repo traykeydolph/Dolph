@@ -22,7 +22,8 @@ from alerts.telegram import TelegramAlerter
 from risk.drawdown_manager import DrawdownManager
 from integrations.google_sheets import SheetsSync
 from integrations.obsidian_journal import open_trade, record_trim, close_trade
-from shadow_logger import log_shadow_observation, format_shadow_alert
+from shadow_logger import (log_shadow_observation, format_shadow_alert, INDEX_TICKERS,
+                           would_execute as shadow_would_execute)
 
 # ── logging setup ─────────────────────────────────────────────────
 
@@ -50,7 +51,9 @@ class TradingBot:
     def __init__(self):
         self.config = Config()
         self.db = Database(self.config.db_path)
-        self.poller = DiscordPoller(self.config)
+        # Persist the poll cursor in the DB so a restart resumes from the last-seen
+        # message instead of reseeding to latest — LIVE_SAFETY.md Blocker 1.
+        self.poller = DiscordPoller(self.config, cursor_store=self.db)
         self.router = SignalRouter(self.config)
         self.position_mgr = PositionManager(self.config, self.db)
         self.spx_converter = SPXConverter()
@@ -58,7 +61,10 @@ class TradingBot:
         self.drawdown_mgr = DrawdownManager(self.config, self.db)
         self._alpaca: Optional[AlpacaClient] = None
         self._coinbase: Optional[CoinbaseClient] = None
+        self._gemini_ok: bool = False       # set by the startup health probe
+        self._gemini_detail: str = "unprobed"
         self._running = False
+        self._stopped = False               # guards against double-teardown
         self._last_daily_reset: Optional[str] = None
         self.sheets = SheetsSync()
 
@@ -127,7 +133,13 @@ class TradingBot:
         await self._poll_loop()
 
     async def stop(self):
-        """Graceful shutdown."""
+        """Graceful shutdown. Idempotent: SIGTERM schedules stop() AND the
+        run_until_complete finally block calls it again — without this guard
+        the second pass sent alert_shutdown() through an already-closed aiohttp
+        session ('Connector is closed.') and dropped the shutdown alert."""
+        if self._stopped:
+            return
+        self._stopped = True
         logger.info("Shutting down trading bot...")
         self._running = False
         await self.alerter.alert_shutdown()
@@ -212,6 +224,20 @@ class TradingBot:
         except Exception as e:
             warnings.append(f"Obsidian Signal Library error: {e}")
 
+        # 5b. Gemini fallback health — a live probe (the client can construct with
+        # an invalid key; it only fails on the first real call). Not fatal: Eva/Ace
+        # are regex-parsed, so Gemini is a fallback net + the Waxui shadow-audit tier.
+        try:
+            self._gemini_ok, self._gemini_detail = await asyncio.wait_for(
+                asyncio.to_thread(self.router.gemini_parser.health_check), timeout=20)
+        except Exception as e:
+            self._gemini_ok, self._gemini_detail = False, str(e)[:120]
+        if self._gemini_ok:
+            logger.info("✅ Gemini fallback reachable")
+        else:
+            warnings.append(f"Gemini fallback DOWN ({self._gemini_detail}) — regex-only; "
+                            f"a regex miss would drop silently, and shadow-audit can't score Gemini")
+
         # 6. Position mismatch check (DB vs broker)
         if self._alpaca:
             try:
@@ -263,6 +289,14 @@ class TradingBot:
                     await self._check_stop_losses()
                 except Exception:
                     logger.exception("Error in stop loss check")
+
+            # Heartbeat: prove the loop itself is alive (not just the process) for
+            # the external health monitor — a stalled poll loop stops updating this.
+            try:
+                with open(HEARTBEAT_FILE, "w") as _hb:
+                    _hb.write(datetime.now(timezone.utc).isoformat())
+            except Exception:
+                pass
 
             await asyncio.sleep(self.config.polling_interval)
 
@@ -321,21 +355,32 @@ class TradingBot:
             logger.debug("Skipping duplicate message %s", msg.message_id)
             return
 
-        # 2b. Stale signal guard — skip messages older than 5 minutes
-        # Prevents executing old signals after bot restart
+        # 2b. Stale signal guard — action & position aware (LIVE_SAFETY.md Blocker 1).
+        # A stale message is normally skipped (don't act on old signals after a
+        # restart), with ONE exception: a close (exit/trim/stop) for a currently
+        # open position must still execute even if late — a recovered close
+        # protects principal. We can't know the action until after parsing, so:
+        #   - No open positions → nothing a late close could protect → skip now,
+        #     without routing (unchanged behaviour, avoids parsing old backlog).
+        #   - A position IS open → let it parse, then decide in step 4b below.
+        is_stale = False
+        age_seconds = 0.0
         if msg.timestamp:
             try:
                 msg_time = datetime.fromisoformat(msg.timestamp.replace('Z', '+00:00'))
                 age_seconds = (datetime.now(timezone.utc) - msg_time).total_seconds()
-                if age_seconds > self.config.stale_signal_seconds:
-                    logger.info("⏭️ Skipping stale message (%.0fs old): %s", age_seconds, msg.message_id)
-                    self.db.log_message(
-                        message_id=msg.message_id, channel_id=msg.channel_id,
-                        content=msg.content, parsed_as={"skipped": "stale_signal", "age_seconds": age_seconds},
-                    )
-                    return
+                is_stale = age_seconds > self.config.stale_signal_seconds
             except Exception:
-                pass  # If timestamp parsing fails, process normally
+                is_stale = False  # unparseable timestamp → process normally
+
+        if is_stale and not self.db.get_open_positions():
+            logger.info("⏭️ Skipping stale message (%.0fs old, no open positions): %s",
+                        age_seconds, msg.message_id)
+            self.db.log_message(
+                message_id=msg.message_id, channel_id=msg.channel_id,
+                content=msg.content, parsed_as={"skipped": "stale_signal", "age_seconds": age_seconds},
+            )
+            return
 
         # 2c. SHADOW / LOG-ONLY channels — observe and return. This branch is
         # the single gate: it returns before step 6's dispatch, so a shadow
@@ -372,6 +417,22 @@ class TradingBot:
             parsed_as=asdict(signal) if signal else None,
         )
 
+        # 4b. Stale gate (post-parse) — a stale message only reached here because
+        # a position is open. Let a close (exit/trim/stop) through to protect it;
+        # drop stale entries/info/noise so we never open an old position.
+        if is_stale:
+            if signal is not None and signal.action in (
+                SignalAction.EXIT, SignalAction.STOP_HIT, SignalAction.TRIM,
+            ):
+                logger.warning("🔁 Recovered STALE %s for %s (%.0fs old) — executing to "
+                               "protect open position: %s",
+                               signal.action, signal.ticker, age_seconds, msg.message_id)
+                # fall through to dispatch
+            else:
+                logger.info("⏭️ Skipping stale %s signal (%.0fs old): %s",
+                            (signal.action if signal else "noise"), age_seconds, msg.message_id)
+                return
+
         if signal is None:
             logger.debug("No actionable signal in message %s", msg.message_id)
             await self._alert_no_action(msg, "no action (noise/unparseable)")
@@ -386,16 +447,22 @@ class TradingBot:
                      signal.action, signal.ticker, signal.direction or "",
                      signal.analyst, signal.confidence)
 
-        # 5. SPX signals — SKIP until Tastytrade is connected (no conversion hack)
-        if signal.ticker and signal.ticker.upper() == "SPX":
-            logger.info("⏭️ Skipping SPX signal from %s — SPX disabled until Tastytrade connected", signal.analyst)
+        # 5. Cash-settled INDEX options (SPX/SPXW/XSP/NDX/RUT/VIX/…) — SKIP: not
+        #    executable on Alpaca until a second broker (Tastytrade) is connected.
+        #    Broadened from SPX-only so a Waxui XSP/NDX/RUT signal can never attempt
+        #    a doomed order once Waxui goes executable. Eva/Ace never emit these,
+        #    so this does not change their behaviour.
+        if signal.ticker and signal.ticker.upper() in INDEX_TICKERS:
+            logger.info("⏭️ Skipping %s index signal from %s — cash-settled index, "
+                        "not executable on Alpaca (needs Tastytrade)",
+                        signal.ticker.upper(), signal.analyst)
             self.db.create_trade(
                 analyst=signal.analyst, message_id=signal.message_id,
                 action=signal.action, asset_type=signal.asset_type,
                 ticker=signal.ticker, direction=signal.direction,
                 strike=signal.strike, expiry=signal.expiry,
                 entry_price=signal.entry_price, confidence=signal.confidence,
-                raw_message=signal.raw_message, status="skipped_spx",
+                raw_message=signal.raw_message, status="skipped_index",
             )
             return
 
@@ -418,43 +485,65 @@ class TradingBot:
         analyst = self.config.channel_to_analyst.get(msg.channel_id, "unknown")
 
         try:
-            signal, tier = await asyncio.wait_for(
+            audit = await asyncio.wait_for(
                 asyncio.to_thread(
-                    self.router.classify_shadow,
+                    self.router.shadow_audit,
                     msg.channel_id, msg.message_id, msg.content,
                     msg.timestamp, msg.embeds, msg.referenced_message,
+                    self._gemini_ok,        # run the Gemini tier only if it's reachable
                 ),
-                timeout=30,
+                timeout=45,
             )
         except asyncio.TimeoutError:
-            logger.error("Shadow classification timed out (30s) for %s", msg.message_id)
-            signal, tier = None, "timeout"
+            logger.error("Shadow classification timed out (45s) for %s", msg.message_id)
+            audit = {"regex_signal": None, "tier": "timeout", "gemini_signal": None,
+                     "gemini_ran": False, "gemini_error": "timeout"}
         except Exception:
             logger.exception("Shadow classification failed for %s", msg.message_id)
-            signal, tier = None, "error"
+            audit = {"regex_signal": None, "tier": "error", "gemini_signal": None,
+                     "gemini_ran": False, "gemini_error": "exception"}
+
+        signal = audit["regex_signal"]
+        tier = audit["tier"]
+        gemini_signal = audit.get("gemini_signal")
 
         path = await asyncio.to_thread(
             log_shadow_observation, analyst, msg.channel_id, msg.message_id,
             msg.content, msg.timestamp, signal, tier,
+            gemini_signal, audit.get("gemini_ran", False),
+            audit.get("gemini_error"), self._gemini_ok,
         )
+
+        # would_execute: what production WOULD have done (regex wins; Gemini on miss).
+        effective = signal if signal is not None else gemini_signal
+        fires = shadow_would_execute(effective)
 
         # Mark processed so the message isn't re-observed next cycle.
         self.db.log_message(
             message_id=msg.message_id, channel_id=msg.channel_id,
             content=msg.content,
             parsed_as={"shadow": True, "tier": tier, "executed": False,
+                       "would_execute": fires,
                        **({"ticker": signal.ticker} if signal else {})},
         )
 
-        logger.info("[SHADOW] %s %s → tier=%s signal=%s (logged to %s, NO ORDER)",
+        gverdict = (f" gemini={gemini_signal.action}/{gemini_signal.ticker}"
+                    if gemini_signal else (" gemini=none" if audit.get("gemini_ran") else ""))
+        logger.info("[SHADOW] %s %s → tier=%s regex=%s%s would_execute=%s (logged, NO ORDER)",
                     analyst, msg.message_id, tier,
-                    f"{signal.action} {signal.ticker}" if signal else "none", path)
+                    f"{signal.action} {signal.ticker}" if signal else "none",
+                    gverdict, fires)
 
-        if self.config.alert_noise or signal is not None:
+        if self.config.alert_noise or signal is not None or fires:
             try:
-                await self.alerter.send_message(
-                    format_shadow_alert(analyst, msg.content, signal, tier)
-                )
+                body = format_shadow_alert(analyst, msg.content, signal, tier)
+                if fires:
+                    body = ("⚠️ <b>WOULD EXECUTE if live</b> "
+                            f"({(effective.action)} {effective.ticker})\n" + body)
+                if gemini_signal is not None:
+                    body += (f"\nGemini: {gemini_signal.action} {gemini_signal.ticker} "
+                             f"@ conf {gemini_signal.confidence:.2f}")
+                await self.alerter.send_message(body)
             except Exception:
                 logger.exception("Shadow Telegram alert failed for %s", msg.message_id)
 
@@ -734,6 +823,25 @@ class TradingBot:
             )
             return
 
+        # Blocker 3: entries never escalate to a naked market order — if the
+        # capped limit didn't fill, the client returns status='skipped'/qty 0.
+        # Do NOT open a phantom position; record the skip and alert.
+        if order_result.get("status") == "skipped" or order_result.get("filled_qty", 0) == 0:
+            note = order_result.get("escalation") or "entry not filled within cap"
+            logger.warning("Entry NOT executed for %s — %s", signal.ticker, note)
+            await self.alerter.send_message(
+                f"⚠️ ENTRY SKIPPED — {signal.analyst} {signal.ticker}\n{note}\nNo position opened."
+            )
+            self.db.create_trade(
+                analyst=signal.analyst, message_id=signal.message_id,
+                action=signal.action, asset_type=signal.asset_type,
+                ticker=signal.ticker, direction=signal.direction,
+                strike=signal.strike, expiry=signal.expiry,
+                entry_price=signal.entry_price, confidence=signal.confidence,
+                raw_message=signal.raw_message, status="skipped",
+            )
+            return
+
         filled_qty = order_result.get("filled_qty", order_result.get("quantity", 1))
         filled_price = order_result.get("filled_price", signal.entry_price or 0)
 
@@ -771,6 +879,23 @@ class TradingBot:
         # Send Telegram alert
         await self.alerter.alert_new_entry(signal, order_result, filled_qty, position_size)
         await self._sync_sheets({"signal": signal, "result": order_result, "action": "entry"})
+
+    async def _alert_escalation(self, signal: ParsedSignal, order_result: dict):
+        """Blocker 3: loud alert when an exit/trim only filled via the emergency
+        limit or the market backstop — surfaces fill-quality degradation so a
+        bad fill is never silent (paper hid these entirely before)."""
+        if not order_result:
+            return
+        stage = order_result.get("fill_stage")
+        note = order_result.get("escalation")
+        if note and stage in ("emergency", "market"):
+            emoji = "🚨" if stage == "market" else "⚠️"
+            await self.alerter.send_message(
+                f"{emoji} FILL ESCALATION — {signal.analyst} {signal.ticker}\n"
+                f"{note}\n"
+                f"Filled @ ${order_result.get('filled_price', 0):.2f} "
+                f"(qty {order_result.get('filled_qty', 0)})."
+            )
 
     async def _handle_trim(self, signal: ParsedSignal):
         """Handle a trim signal."""
@@ -810,9 +935,17 @@ class TradingBot:
             trim_qty = max(1, int(position.current_quantity * trim_fraction))
             trim_qty = min(trim_qty, position.current_quantity)
 
-        # Execute exit for the trimmed portion
+        # Execute exit for the trimmed portion.
+        # trim_price is the ACTUAL fill (order_result['filled_price']) set inside
+        # the branch below. It defaults to the signal price only as a last resort
+        # when no order path runs (order_result stays None → early-returned below).
+        # NOTE (Blocker 2 fix): there used to be a `try/except/else` here whose
+        # `else` ran on SUCCESS and overwrote trim_price with signal.entry_price —
+        # booking every trim at the analyst's signal price, not the real fill
+        # (e.g. CSCO booked +$15 vs a real −$15). The else is gone.
         is_crypto = signal.asset_type in (AssetType.CRYPTO, AssetType.CRYPTO.value, 'crypto')
         order_result = None
+        trim_price = signal.entry_price or 0
         try:
             if is_crypto and self._coinbase:
                 order_result = await asyncio.wait_for(
@@ -832,8 +965,6 @@ class TradingBot:
                 f"🚨 TRIM TIMEOUT — {signal.ticker}\nOrder timed out. Check broker for orphaned orders."
             )
             order_result = None
-        else:
-            trim_price = signal.entry_price or 0
 
         # If order failed, don't update position — we still hold the contracts
         if order_result is None:
@@ -870,6 +1001,9 @@ class TradingBot:
                 status="trim_failed",
             )
             return
+
+        # Blocker 3: surface a degraded (emergency/market) fill loudly.
+        await self._alert_escalation(signal, order_result)
 
         # Update position tracking
         trim_result = self.position_mgr.trim_position(signal, trim_price)
@@ -969,9 +1103,14 @@ class TradingBot:
         if position.asset_type and not signal.asset_type:
             signal.asset_type = position.asset_type
 
-        # Execute full exit
+        # Execute full exit. exit_price is the ACTUAL fill set in the branch
+        # below (or by the force-close retry on timeout). Defaults to the signal
+        # price only if no order path runs. NOTE (Blocker 2 fix): the old
+        # `try/except/else` `else` ran on SUCCESS and overwrote exit_price with
+        # signal.entry_price, booking exits at the signal price not the fill.
         order_result = None
         is_crypto = signal.asset_type in (AssetType.CRYPTO, AssetType.CRYPTO.value, 'crypto')
+        exit_price = signal.entry_price or 0
         try:
             if is_crypto and self._coinbase:
                 order_result = await asyncio.wait_for(
@@ -991,8 +1130,6 @@ class TradingBot:
                 f"🚨 EXIT TIMEOUT — {signal.ticker}\nOrder timed out. Attempting force close..."
             )
             order_result = None  # Falls through to force-close retry below
-        else:
-            exit_price = signal.entry_price or 0
 
         # ── FIX: Check if order actually filled (not just submitted) ──
         if order_result and order_result.get("status") in ("pending", "cancelled", "rejected", "expired"):
@@ -1004,6 +1141,10 @@ class TradingBot:
             logger.warning("Exit order filled_qty=0 for %s %s — treating as failed",
                           signal.analyst, signal.ticker)
             order_result = None  # Trigger force-close retry below
+
+        # Blocker 3: a confirmed primary exit that only filled via the
+        # emergency limit or market backstop → loud alert (no-op otherwise).
+        await self._alert_escalation(signal, order_result)
 
         # If exit order failed, try force-closing at current market price
         if order_result is None and (is_crypto or (self._alpaca and not is_crypto)):
@@ -1340,6 +1481,7 @@ class TradingBot:
 # ── entry point ───────────────────────────────────────────────────
 
 PID_FILE = os.path.join(os.path.dirname(__file__), "trading_bot.pid")
+HEARTBEAT_FILE = os.path.join(os.path.dirname(__file__), "trading_bot.heartbeat")
 
 
 def _check_pid_lock():

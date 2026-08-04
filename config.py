@@ -22,6 +22,10 @@ class Config:
 
     # Gemini
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    # Blocker 4: hard timeout (seconds) on the Gemini network call so a network
+    # blip that can resolve DNS but not complete the connection fails fast
+    # (→ except → return None) instead of hanging message processing forever.
+    gemini_timeout_seconds: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "10"))
 
     # Alpaca
     alpaca_api_key: str = os.getenv("ALPACA_API_KEY", "")
@@ -93,6 +97,17 @@ class Config:
     # Polling
     polling_interval: int = int(os.getenv("POLLING_INTERVAL", "15"))
     stale_signal_seconds: int = int(os.getenv("STALE_SIGNAL_SECONDS", "600"))  # 10 min default
+
+    # Blocker 3 — order fill ladder (never send a naked/unbounded market order).
+    # Detect non-fill fast, then step the limit toward a bounded cap:
+    #   entry: ask → ask+cap → SKIP+alert (skipping an entry costs nothing)
+    #   exit:  bid → bid−cap → bid−emergency → true market + LOUD alert (must go flat)
+    # cap = max(pct·price, abs) so cheap options can still cross a wide spread.
+    fill_poll_interval: float = float(os.getenv("FILL_POLL_INTERVAL", "0.5"))   # status poll cadence (s)
+    fill_step_timeout: float = float(os.getenv("FILL_STEP_TIMEOUT", "3"))       # wait per rung (s)
+    slippage_cap_pct: float = float(os.getenv("SLIPPAGE_CAP_PCT", "0.05"))      # normal cap: 5%
+    slippage_cap_abs: float = float(os.getenv("SLIPPAGE_CAP_ABS", "0.03"))      # or $0.03, whichever larger
+    emergency_slippage_pct: float = float(os.getenv("EMERGENCY_SLIPPAGE_PCT", "0.20"))  # exit-only tail: 20%
 
     # Alerts: notify on every seen-but-skipped message (max-verbosity validation
     # mode). Set ALERT_NOISE=0 to quiet down after trust is built.
