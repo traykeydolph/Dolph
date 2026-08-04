@@ -7,6 +7,31 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 
 ---
 
+## 2026-08-03 — Fix fill-ladder double-fill race (🚨 critical)
+
+Found in the EOD: Eva's SPY 720P exit **filled twice** (rung 1 limit @1.68 AND the
+capped rung @1.60 both filled) — we held 1, sold 2, and went **short 1** on Alpaca
+while the DB booked a clean close. Root cause: the ladder `_cancel_quietly`'d the
+previous rung and **resubmitted the full quantity** without checking whether the
+cancel actually beat the fill. On a marketable limit the fill can win that race.
+(The race pre-existed in the old 15s→market path; the 3s escalation window made it
+frequent enough to hit.)
+
+- `alpaca_client._cancel_and_settle`: cancels a rung, then reads its **terminal
+  fill** (qty, avg price). Both option ladders now accumulate fills and escalate
+  only the **unfilled remainder** — a rung that filled during the race is detected
+  and the ladder stops instead of double-submitting. The exit's final market
+  backstop is never cancelled (guaranteed fill).
+- Erroneous short flattened on paper (bounded limit buy queued for the open).
+- Tests: `tests/test_blocker34_fill_ladder.py` +2 (`TestNoDoubleFillOnRace`) — a
+  rung that fills during the cancel race must not escalate; total filled == held.
+  Suite 459 green.
+
+This is a hard go-live gate: a double-fill flips you into an unintended opposite
+position (worse than the market-overpay it replaced).
+
+---
+
 ## 2026-08-03 — Health monitor: stop burning Gemini quota
 
 The 5-min health timer live-probed Gemini every run (~288 calls/day), which by

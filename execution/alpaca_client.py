@@ -151,70 +151,67 @@ class AlpacaClient:
         side = 'buy' if signal.direction in ['call', 'put', 'long'] else 'sell'
         step = getattr(self.config, "fill_step_timeout", 3)
 
+        remaining = quantity
+        fills = []
+        fill_stage = None
+        last_order = None
+
         # Rung 1 — marketable limit at the ask.
         limit_price = round(quote['ask'], 2) if quote['ask'] else round(mid_price * 1.02, 2)
-        order = self.api.submit_order(
-            symbol=option_symbol,
-            qty=quantity,
-            side=side,
-            type='limit',
-            limit_price=limit_price,
-            time_in_force='day',
-            client_order_id=f"{signal.analyst}_{signal.message_id}"
-        )
+        last_order = self.api.submit_order(
+            symbol=option_symbol, qty=remaining, side=side, type='limit',
+            limit_price=limit_price, time_in_force='day',
+            client_order_id=f"{signal.analyst}_{signal.message_id}")
         logger.info("Submitted option entry limit (rung 1): %s %d %s @ $%.2f",
-                   side, quantity, option_symbol, limit_price)
-        filled_order = self._wait_for_fill(order.id, timeout=step)
+                   side, remaining, option_symbol, limit_price)
+        self._wait_for_fill(last_order.id, timeout=step)
+        # Settle definitively before escalating — never resubmit over a raced fill.
+        fq, fp = self._cancel_and_settle(last_order.id)
         fill_stage = 'limit'
-        escalation = None
+        if fq > 0:
+            fills.append((fq, fp)); remaining -= fq
 
-        # Rung 2 — capped marketable limit at ask + cap. NEVER a market order:
-        # skipping an entry costs nothing, so a naked market is never justified.
-        if not self._filled_ok(filled_order):
-            self._cancel_quietly(order.id)
+        # Rung 2 — capped marketable limit at ask + cap, for the unfilled remainder.
+        # NEVER a market order: skipping an entry costs nothing.
+        if remaining > 0:
             q2 = self._get_option_quote(option_symbol) or quote
             ask2 = q2.get('ask') or quote.get('ask') or mid_price
             cap_price = round(ask2 + self._slippage(ask2), 2)
             logger.warning("Entry %s unfilled in %.1fs — repricing to capped limit $%.2f (rung 2)",
                           option_symbol, step, cap_price)
-            order = self.api.submit_order(
-                symbol=option_symbol,
-                qty=quantity,
-                side=side,
-                type='limit',
-                limit_price=cap_price,
-                time_in_force='day',
-                client_order_id=f"{signal.analyst}_{signal.message_id}_c"
-            )
-            filled_order = self._wait_for_fill(order.id, timeout=step)
+            last_order = self.api.submit_order(
+                symbol=option_symbol, qty=remaining, side=side, type='limit',
+                limit_price=cap_price, time_in_force='day',
+                client_order_id=f"{signal.analyst}_{signal.message_id}_c")
+            self._wait_for_fill(last_order.id, timeout=step)
+            fq, fp = self._cancel_and_settle(last_order.id)
             fill_stage = 'capped'
+            if fq > 0:
+                fills.append((fq, fp)); remaining -= fq
 
-            if not self._filled_ok(filled_order):
-                self._cancel_quietly(order.id)
-                logger.warning("Entry %s NOT filled at capped limit $%.2f — SKIPPING "
-                              "(entries never escalate to market)", option_symbol, cap_price)
-                return {
-                    'order_id': order.id,
-                    'symbol': option_symbol,
-                    'quantity': quantity,
-                    'side': side,
-                    'status': 'skipped',
-                    'fill_stage': 'skipped',
-                    'escalation': f"entry SKIPPED — unfilled at capped limit ${cap_price:.2f}",
-                    'filled_price': 0,
-                    'filled_qty': 0,
-                }
+        total_qty = sum(q for q, _ in fills)
+        if total_qty == 0:
+            logger.warning("Entry %s NOT filled — SKIPPING (entries never escalate to market)",
+                          option_symbol)
+            return {
+                'order_id': last_order.id if last_order else None,
+                'symbol': option_symbol, 'quantity': quantity, 'side': side,
+                'status': 'skipped', 'fill_stage': 'skipped',
+                'escalation': "entry SKIPPED — unfilled at capped limit",
+                'filled_price': 0, 'filled_qty': 0,
+            }
 
+        avg_price = sum(q * p for q, p in fills) / total_qty
         return {
-            'order_id': order.id,
+            'order_id': last_order.id if last_order else None,
             'symbol': option_symbol,
             'quantity': quantity,
             'side': side,
-            'status': filled_order.status if filled_order else 'pending',
+            'status': 'filled' if total_qty >= quantity else 'partially_filled',
             'fill_stage': fill_stage,
-            'escalation': escalation,
-            'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else mid_price,
-            'filled_qty': int(filled_order.filled_qty) if filled_order else 0
+            'escalation': None,
+            'filled_price': avg_price,
+            'filled_qty': total_qty,
         }
     
     def _execute_stock_entry(self, signal: ParsedSignal, position_size: float) -> Optional[Dict[str, Any]]:
@@ -302,46 +299,65 @@ class AlpacaClient:
             # No bid to anchor a limit — go straight to market (as before).
             rungs = [('market', None, 'market', base + "_mkt")]
 
-        order = None
-        filled_order = None
+        last_order = None
         fill_stage = None
         escalation = None
+        remaining = quantity
+        fills = []            # (qty, avg_price) accumulated across rungs
+        n = len(rungs)
 
-        for otype, price, label, coid in rungs:
-            if order is not None:
-                self._cancel_quietly(order.id)  # clear the previous unfilled rung
-            kwargs = dict(symbol=option_symbol, qty=quantity, side=side,
+        for i, (otype, price, label, coid) in enumerate(rungs):
+            if remaining <= 0:
+                break
+            is_last = (i == n - 1)
+            kwargs = dict(symbol=option_symbol, qty=remaining, side=side,
                           type=otype, time_in_force='day', client_order_id=coid)
             if otype == 'limit':
                 kwargs['limit_price'] = price
                 logger.info("Submitted option exit %s: %s %d %s @ $%.2f",
-                           label, side, quantity, option_symbol, price)
+                           label, side, remaining, option_symbol, price)
             else:
                 logger.warning("Option exit MARKET BACKSTOP fired for %s — all bounded "
                               "limits unfilled; taking any price to go flat", option_symbol)
-            order = self.api.submit_order(**kwargs)
-            # Market rung gets a longer window; it should fill near-instantly.
-            filled_order = self._wait_for_fill(order.id, timeout=(10 if otype == 'market' else step))
+            last_order = self.api.submit_order(**kwargs)
+            filled_order = self._wait_for_fill(last_order.id, timeout=(10 if otype == 'market' else step))
             fill_stage = label
-            if self._filled_ok(filled_order):
-                break
-            if otype == 'limit':
-                logger.warning("Exit rung '%s' ($%.2f) unfilled in %.1fs — escalating",
-                              label, price, step)
 
+            if is_last:
+                # Guaranteed-fill backstop — take whatever filled; never cancel it.
+                fq, fp = self._order_fill(filled_order) if filled_order else (0, 0.0)
+                if fq > 0:
+                    fills.append((fq, fp)); remaining -= fq
+                break
+
+            # Not the last rung: settle definitively (the fill may have raced the
+            # cancel) and escalate only the unfilled remainder — never resubmit
+            # the full qty, or we double-fill.
+            fq, fp = self._cancel_and_settle(last_order.id)
+            if fq > 0:
+                fills.append((fq, fp)); remaining -= fq
+                logger.info("Exit rung '%s' settled with %d filled @ $%.2f — %d remaining",
+                           label, fq, fp, remaining)
+            if remaining > 0:
+                logger.warning("Exit rung '%s' left %d unfilled — escalating", label, remaining)
+
+        total_qty = sum(q for q, _ in fills)
+        avg_price = (sum(q * p for q, p in fills) / total_qty) if total_qty else 0.0
+        status = ('filled' if total_qty >= quantity
+                  else 'partially_filled' if total_qty > 0 else 'pending')
         if fill_stage in ('emergency', 'market'):
             escalation = f"exit filled via {fill_stage} escalation (bounded limits unfilled)"
 
         return {
-            'order_id': order.id,
+            'order_id': last_order.id if last_order else None,
             'symbol': option_symbol,
             'quantity': quantity,
             'side': side,
-            'status': filled_order.status if filled_order else 'pending',
+            'status': status,
             'fill_stage': fill_stage,
             'escalation': escalation,
-            'filled_price': float(filled_order.filled_avg_price) if filled_order and filled_order.filled_avg_price else 0,
-            'filled_qty': int(filled_order.filled_qty) if filled_order else 0
+            'filled_price': avg_price,
+            'filled_qty': total_qty,
         }
     
     def _execute_stock_exit(self, signal: ParsedSignal, quantity: int) -> Optional[Dict[str, Any]]:
@@ -752,6 +768,43 @@ class AlpacaClient:
             self.api.cancel_order(order_id)
         except Exception:
             pass
+
+    def _cancel_and_settle(self, order_id: str) -> tuple:
+        """Cancel a rung and return what it ACTUALLY filled: (filled_qty, avg_price).
+
+        A cancel can lose a race with a fill — the order fills in the moment
+        between our last poll and the cancel landing. If we ignored that and
+        resubmitted the full quantity for the next rung, we'd execute twice and
+        end up in an unintended opposite position (the SPY 720P double-fill on
+        08-03: sold 2, held 1, went short). So after cancelling we read the
+        order's terminal state and report any real fill, so the ladder only ever
+        escalates the *unfilled remainder*. Returns (0, 0.0) if truly unfilled."""
+        try:
+            self.api.cancel_order(order_id)
+        except Exception:
+            pass  # already filled/cancelled — the terminal read below is truth
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                o = self.api.get_order(order_id)
+            except Exception:
+                break
+            if getattr(o, "status", None) in (
+                "canceled", "cancelled", "filled", "rejected", "expired", "done_for_day"
+            ):
+                return self._order_fill(o)
+            time.sleep(0.2)
+        try:
+            return self._order_fill(self.api.get_order(order_id))
+        except Exception:
+            return 0, 0.0
+
+    @staticmethod
+    def _order_fill(o: Any) -> tuple:
+        """(filled_qty, filled_avg_price) from an order, defaulting to (0, 0.0)."""
+        fq = int(getattr(o, "filled_qty", 0) or 0)
+        fp = float(o.filled_avg_price) if getattr(o, "filled_avg_price", None) else 0.0
+        return fq, fp
     
     def get_account_info(self) -> Optional[Dict[str, Any]]:
         """Get account information and buying power."""

@@ -233,3 +233,60 @@ class TestStopIsIdempotent:
 
         assert calls == {"shutdown": 1, "close": 1, "db": 1}
         assert b._stopped is True
+
+
+# ── Regression: no double-fill when a rung fills during the cancel race ───────
+
+class _RacyExitApi(_FakeApi):
+    """Reproduces the 08-03 SPY 720P double-fill: rung 1 reads 'new' while the
+    ladder polls (so it decides to escalate), but the order has actually FILLED
+    by the time the cancel lands. The old code ignored the raced fill and
+    submitted the next rung too — selling twice and going short."""
+
+    def __init__(self, fill_price=1.68):
+        super().__init__(fill_rule=lambda kw: None)   # nothing fills on submit/poll
+        self.fill_price = fill_price
+        self._racy_id = None
+
+    def submit_order(self, **kw):
+        o = super().submit_order(**kw)
+        if self._racy_id is None:
+            self._racy_id = o.id          # the first rung is the racy one
+        return o
+
+    def cancel_order(self, oid):
+        o = self._orders.get(oid)
+        if oid == self._racy_id and o is not None:
+            # the fill won the race — the cancel finds it already filled
+            o.status = "filled"
+            o.filled_qty = int(self.submitted[0].get("qty", 1))
+            o.filled_avg_price = self.fill_price
+        elif o is not None and o.status == "new":
+            o.status = "canceled"
+
+
+class TestNoDoubleFillOnRace:
+    def _racy_client(self, fill_price=1.68):
+        c = _client(lambda kw: None)
+        c.api = _RacyExitApi(fill_price)
+        return c
+
+    def test_exit_settles_raced_fill_and_does_not_escalate(self):
+        c = self._racy_client(fill_price=1.68)
+        res = c._execute_option_exit(_signal(SignalAction.EXIT.value), quantity=1)
+        # the whole point: we sold exactly what we held — never twice
+        assert res["filled_qty"] == 1, "double-fill regressed — sold more than held"
+        assert len(c.api.submitted) == 1, "must NOT submit a 2nd rung once rung 1 filled"
+        assert c.api.market_count() == 0
+        assert res["status"] == "filled"
+        assert res["fill_stage"] == "limit"
+        assert res["filled_price"] == 1.68
+
+    def test_entry_settles_raced_fill_and_does_not_escalate(self):
+        c = self._racy_client(fill_price=0.30)
+        res = c._execute_option_entry(_signal(), position_size=400)
+        submitted_qty = c.api.submitted[0]["qty"]   # entry sizes its own qty
+        assert res["filled_qty"] == submitted_qty, "double-fill regressed on entry"
+        assert len(c.api.submitted) == 1, "must NOT submit rung 2 once rung 1 filled"
+        assert res["status"] == "filled"
+        assert res["fill_stage"] == "limit"
