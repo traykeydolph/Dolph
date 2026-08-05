@@ -10,19 +10,23 @@ Legend: 🔧 near-term · 🚀 go-live/scale-up · 👤 needs Tray · 👀 watch
 
 ---
 
-## 1. Waxui parser hardening 🔧 (shadow-only, one change + a regression test per case)
+## 1. Waxui parser hardening ✅ DONE (2026-08-04, `tests/test_waxui_hardening.py`, suite 479)
 
-| # | Fluke (real message) | Current (wrong) | Fix |
+All 5 shipped in one Waxui change with a regression test per case (shadow-only):
+
+| # | Fluke (real message) | Was | Now |
 |---|---|---|---|
-| 1 | `Closed SPX @B/E`, `Closed SPY @2.50` | exit regex requires "here" → misses → Gemini → **info (missed exit, incl. executable tickers)** | broaden to `Closed {TICKER}` → **exit** regardless of trailing text (here / @price / @B/E / none) |
-| 2 | `SPXXX … Holding 2/2!` | `HOLDING_RE` hardcodes `1/2` → **trim read as exit** | generalize to any `\d+/\d+` |
-| 3 | `Reduced risk @X` (×3) | on the noise list → **noise** | it's a partial sell → **trim** (capture the price); remove from noise |
-| 4 | `Using /ES 7630 as trail` | not in noise patterns → **Gemini → info** (wastes a scarce call) | broaden trail/stop noise pattern → caught by **regex** |
-| 5 | `Added to SPY @X, New Avg Y` (×2) | parses `entry, strike=None` → could open a **2nd phantom position** | explicit **add/scale-in** handling; **never open a 2nd position** (skip at 1 contract; add size when quantity-aware) — ⚠️ SAFETY |
+| 1 ✅ | `Closed SPX @B/E`, `Closed SPY @2.50` | needed "here" → missed → Gemini → info | `Closed {TICKER}` → **exit** (any trailing text) |
+| 2 ✅ | `SPXXX … Holding 2/2!` | `1/2` hardcoded → trim read as exit | any `\d+/\d+` → **trim** |
+| 3 ✅ | `Reduced risk @X` (×3) | on noise list → noise | `REDUCE_RE` → **trim** (captures price) |
+| 4 ✅ | `Using /ES 7630 as trail` | fell to Gemini → info | `as trail` / `trailing stop` → **regex noise** |
+| 5 ✅ | `Added to SPY @X` (×2) | `entry, strike=None` → phantom 2nd position | **info** (non-actionable; real add = quantity-aware phase) |
 
 **Decision locked (trim behavior at 1 contract):** any trim = full close. Use **"A"
 (exit at the first trim) now**; move to laddered/quantity-aware once multi-contract.
-So #2/#3 correct the *classification*; execution stays "first trim closes" for now.
+#2/#3 corrected the *classification*; execution stays "first trim closes" for now.
+*Follow-up:* tickerless trims (e.g. `Reduced risk @X`) default the ticker via
+`_extract_ticker` — add sole-open-position resolution before Waxui executes live.
 
 ## 2. Reliability & data
 

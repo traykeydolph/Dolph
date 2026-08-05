@@ -39,11 +39,16 @@ class WaxuiParser:
         re.IGNORECASE
     )
     
-    # Avg down entry
+    # "Added to TICKER @X" = scale-in / add to an EXISTING position (NOT a fresh
+    # entry — classified as info so it can never open a 2nd phantom position; a
+    # real size-increase comes with quantity-aware trading, post-streak).
     AVG_DOWN_RE = re.compile(
         r'Added\s+to\s+([A-Z]{2,5})\s+@\s*(\d+(?:\.\d+)?)',
         re.IGNORECASE
     )
+
+    # "Reduced risk @X" = partial de-risk SELL = TRIM (distinct from "Added to").
+    REDUCE_RE = re.compile(r'Reduced\s+risk\s*@?\s*(\d+(?:\.\d+)?)', re.IGNORECASE)
     
     # Trim detection: ✅ with "Holding"
     TRIM_RE = re.compile(
@@ -53,7 +58,9 @@ class WaxuiParser:
     
     # Holding language (distinguishes TRIM from EXIT)
     HOLDING_RE = re.compile(
-        r'Holding\s+(most|majority|half|1/2|runners?\s*only|last\s*cons?\.?)',
+        # any N/N fraction ("Holding 2/2!", "Holding 1/2") — not just 1/2 — so a
+        # "still holding" update never gets misread as a full exit.
+        r'Holding\s+(most|majority|half|\d+/\d+|runners?\s*only|last\s*cons?\.?)',
         re.IGNORECASE
     )
     
@@ -64,8 +71,11 @@ class WaxuiParser:
     NOISE_PATTERNS = [
         re.compile(r'Done for (?:today|the day)', re.IGNORECASE),
         re.compile(r'Trail stops? set', re.IGNORECASE),
+        re.compile(r'\bas\s+(?:a\s+)?trail\b', re.IGNORECASE),   # "Using /ES 7630 as trail"
+        re.compile(r'\btrailing\s+stops?\b', re.IGNORECASE),
         re.compile(r'Enjoy the weekend', re.IGNORECASE),
-        re.compile(r'Reduced risk', re.IGNORECASE),
+        # NOTE: "Reduced risk @X" removed from noise — it's a partial de-risk SELL
+        # (a trim), handled by REDUCE_RE in extract_details.
         re.compile(r'Pillow secured', re.IGNORECASE),
         re.compile(r'\d+%\*$', re.IGNORECASE),  # "50%*" correction messages
         # "Day Trade idea" watchlist posts ("*CRWV*, Day Trade idea… Love the
@@ -81,7 +91,10 @@ class WaxuiParser:
     
     # Exit patterns (only these are real exits)
     EXIT_PATTERNS = [
-        re.compile(r'Closed\s+\w+\s+here', re.IGNORECASE),
+        # "Closed {TICKER}" — regardless of what follows (here / @2.50 / @B/E /
+        # nothing). Requires an UPPERCASE ticker so "Closed out"/"Closed the …"
+        # don't match. Break-even & no-price closes used to slip to flaky Gemini.
+        re.compile(r'\bClosed\s+\$?[A-Z]{1,6}\b'),
         re.compile(r'Stopped\s+(?:out\s+)?(?:of\s+)?(?:on\s+)?\w+\s*🔻', re.IGNORECASE),
         re.compile(r"NOW\s+i['\u2019]?m?\s+out", re.IGNORECASE),
     ]
@@ -143,12 +156,16 @@ class WaxuiParser:
                 timestamp=timestamp,
             )
         
-        # Check avg down
+        # "Added to TICKER @X" = scale-in / add to an EXISTING position. Classified
+        # as INFO (non-actionable) so it NEVER opens a 2nd phantom position — the
+        # old code returned an ENTRY with strike=None, which the duplicate guard
+        # couldn't match, risking a second SPY position. A real size-increase
+        # comes with quantity-aware trading (post-streak).
         match = WaxuiParser.AVG_DOWN_RE.search(message)
         if match:
             return ParsedSignal(
                 analyst="waxui",
-                action=SignalAction.ENTRY.value,
+                action=SignalAction.INFO.value,
                 asset_type=AssetType.OPTION.value,
                 ticker=match.group(1).upper(),
                 direction=None,
@@ -161,7 +178,27 @@ class WaxuiParser:
                 message_id=message_id,
                 timestamp=timestamp,
             )
-        
+
+        # "Reduced risk @X" = partial de-risk SELL = TRIM (price given; ticker is
+        # the current open position, so it's implicit / resolved at execution).
+        reduce_match = WaxuiParser.REDUCE_RE.search(message)
+        if reduce_match:
+            return ParsedSignal(
+                analyst="waxui",
+                action=SignalAction.TRIM.value,
+                asset_type=AssetType.OPTION.value,
+                ticker=WaxuiParser._extract_ticker(message),
+                direction=None,
+                strike=None,
+                expiry=None,
+                entry_price=float(reduce_match.group(1)),
+                trim_fraction=1.0,
+                confidence=0.90,
+                raw_message=message,
+                message_id=message_id,
+                timestamp=timestamp,
+            )
+
         # Check trim (✅ with Holding)
         trim_match = WaxuiParser.TRIM_RE.search(message)
         if trim_match:

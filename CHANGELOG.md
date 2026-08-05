@@ -7,6 +7,32 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 
 ---
 
+## 2026-08-04 — Waxui parser hardening (5 validation flukes)
+
+Fixes from the parse-validation pass (all Waxui/shadow — no Eva/Ace or streak
+impact). Each was a real misclassification caught before Waxui goes live:
+
+1. **`Closed {TICKER}` → exit** regardless of trailing text. The exit regex
+   required the word "here", so `Closed SPX @B/E` / `Closed SPY @2.50` (break-even
+   / no-"here" closes) slipped to a flaky Gemini and were logged `info` — a missed
+   exit, including on executable tickers. Now matches an uppercase ticker after
+   "Closed" ("Closed out"/"Closed the…" still excluded).
+2. **`Holding N/N` → trim.** `HOLDING_RE` hardcoded `1/2`; `Holding 2/2!` (still
+   holding all) was misread as a full exit. Generalized to any `\d+/\d+`.
+3. **`Reduced risk @X` → trim** (was on the noise list). It's a partial de-risk
+   SELL; new `REDUCE_RE` captures the price.
+4. **Trail/stop commentary → regex noise** (was falling to Gemini). `Using /ES
+   7630 as trail` now caught by regex (`as trail` / `trailing stop`), saving a
+   scarce free-tier call.
+5. **`Added to {TICKER}` → info** (was `entry` with strike=None). As an entry it
+   could open a **2nd phantom position** (the duplicate guard can't match a
+   strikeless entry). Now non-actionable info; a real size-increase comes with
+   quantity-aware trading (post-streak).
+
+Tests: `tests/test_waxui_hardening.py` (20). Suite 479 green.
+
+---
+
 ## 2026-08-04 — Obsidian journal path portable (VPS)
 
 Trade-journal writes hardcoded the dev Mac's Obsidian vault path, so on the VPS
