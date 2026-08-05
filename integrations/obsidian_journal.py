@@ -21,13 +21,23 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-VAULT_BASE = "/Users/tray/Documents/Dolph & Tray/Trading"
+# Journal location is configurable (default = the dev Mac's Obsidian vault). On a
+# VPS without the vault, set OBSIDIAN_JOURNAL_PATH in .env to a writable dir.
+VAULT_BASE = os.getenv("OBSIDIAN_JOURNAL_PATH", "/Users/tray/Documents/Dolph & Tray/Trading")
 ACTIVE_DIR = os.path.join(VAULT_BASE, "Active Trades")
 CLOSED_DIR = os.path.join(VAULT_BASE, "Closed Trades")
 
-# Ensure directories exist
-os.makedirs(ACTIVE_DIR, exist_ok=True)
-os.makedirs(CLOSED_DIR, exist_ok=True)
+# Ensure directories exist; if the path isn't writable (e.g. VPS, no vault),
+# disable journaling gracefully instead of erroring on every trade. The DB and
+# Google Sheets remain the source of truth — the journal is a convenience mirror.
+_JOURNAL_ENABLED = True
+try:
+    os.makedirs(ACTIVE_DIR, exist_ok=True)
+    os.makedirs(CLOSED_DIR, exist_ok=True)
+except OSError as _e:
+    _JOURNAL_ENABLED = False
+    logger.warning("Obsidian journal disabled — %r not writable (%s); "
+                   "set OBSIDIAN_JOURNAL_PATH to enable.", VAULT_BASE, _e)
 
 
 def _trade_filename(trade_id: int, ticker: str, analyst: str) -> str:
@@ -57,7 +67,8 @@ def open_trade(trade_id: int, analyst: str, ticker: str, asset_type: str,
                message_id: str = None, raw_message: str = None,
                confidence: float = None):
     """Create a new trade note in Active Trades/ on entry."""
-    
+    if not _JOURNAL_ENABLED:
+        return
     filename = _trade_filename(trade_id, ticker, analyst)
     filepath = os.path.join(ACTIVE_DIR, filename)
     
@@ -131,7 +142,8 @@ def record_trim(trade_id: int, ticker: str, analyst: str,
                 remaining_qty: float = None, message_id: str = None,
                 raw_message: str = None):
     """Append a trim record to an active trade note."""
-    
+    if not _JOURNAL_ENABLED:
+        return
     filename = _trade_filename(trade_id, ticker, analyst)
     filepath = os.path.join(ACTIVE_DIR, filename)
     
@@ -187,7 +199,8 @@ def close_trade(trade_id: int, ticker: str, analyst: str,
                 exit_quantity: float = None, reason: str = "signal",
                 message_id: str = None, raw_message: str = None):
     """Append close record to trade note and move to Closed Trades/."""
-    
+    if not _JOURNAL_ENABLED:
+        return
     filename = _trade_filename(trade_id, ticker, analyst)
     active_path = os.path.join(ACTIVE_DIR, filename)
     closed_path = os.path.join(CLOSED_DIR, filename)

@@ -33,3 +33,6 @@ trading_bot.heartbeat
 .health_state.json
 trading_bot.stdout.log
 .verify_state.json
+
+# Trade journal notes when written on a host without the Obsidian vault (VPS)
+trade_journal/

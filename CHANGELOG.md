@@ -7,6 +7,20 @@ day-by-day results live in `CURRENT_STATUS.md`; pre-live safety gates in
 
 ---
 
+## 2026-08-04 — Obsidian journal path portable (VPS)
+
+Trade-journal writes hardcoded the dev Mac's Obsidian vault path, so on the VPS
+every trade logged `[ERROR] Failed to write trade journal` (harmless — the DB and
+Sheets are the source of truth — but noisy on every trade).
+
+- `integrations/obsidian_journal.py`: `VAULT_BASE` is now
+  `os.getenv("OBSIDIAN_JOURNAL_PATH", <mac default>)`; if the path isn't writable
+  the module **disables journaling gracefully** (one warning, then the three write
+  functions no-op) instead of erroring per trade. On the box `OBSIDIAN_JOURNAL_PATH`
+  points at a gitignored `trade_journal/` dir so journaling works there too.
+
+---
+
 ## 2026-08-03 — Fix fill-ladder double-fill race (🚨 critical)
 
 Found in the EOD: Eva's SPY 720P exit **filled twice** (rung 1 limit @1.68 AND the

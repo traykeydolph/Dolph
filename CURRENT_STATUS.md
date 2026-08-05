@@ -8,6 +8,18 @@ truth for continuity.*
 ---
 
 ## Where we are (TL;DR)
+- **🗓️ 08-04 (Tue) EOD — ✅ CLEAN · streak 1/30 (first clean day on fully-fixed code, 24/7 VPS).**
+  - **🎯 Double-fill fix VALIDATED LIVE:** ORCL entry escalated (rung 1 $2.95 unfilled 3s → capped
+    $3.13) and filled **exactly 1 contract @ $3.00 — no double-fill.** `_cancel_and_settle` works;
+    Alpaca shows no ORCL orphan. Yesterday's bug can't recur.
+  - **SPY short flattened at open** (buy 1 @ $0.89, 13:30 UTC) → orphan gone, account reconciled.
+  - **ORCL +$50** lifecycle (entry $3.00 → trim/close $3.50, booked = real, Δ0). **NFLX 75C @ $0.61**
+    carried open (DB 1 / Alpaca 1 in sync). ORCL exit correctly **skipped** (already closed). Eva
+    100% regex, zero Gemini on execute path.
+  - **⚠️ Peripheral errors to fix (don't affect trading; daily_verify correctly ignored):** Obsidian
+    journal writes FAIL on the box (Mac path missing — same class as the Signal Library portability
+    bug; errors on every trade); one Google-Sheets position-update fail; one overnight Telegram fail.
+  - Waxui shadow: 18 obs (5 regex / 6 would-Gemini / 7 noise), 0 orders.
 - **🗓️ 08-03 (Mon) EOD — 🚨 DIRTY · streak 0/30, but a critical bug was caught & fixed.**
   - **Headline:** Eva's SPY 720P exit **double-filled** — rung 1 (limit @1.68) AND the capped
     rung (@1.60) both filled → sold 2 holding 1 → **went short 1** while the DB booked a clean
